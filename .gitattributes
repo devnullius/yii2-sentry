@@ -1,0 +1,73 @@
+# Automatically normalize line endings for all text-based files
+# https://git-scm.com/docs/gitattributes#_end_of_line_conversion
+
+* text=auto
+
+# Ignore some meta files when creating an archive of this repository
+CONTRIBUTING.md export-ignore
+
+# Avoid merge conflicts in CHANGELOG
+# https://about.gitlab.com/2015/02/10/gitlab-reduced-merge-conflicts-by-90-percent-with-changelog-placeholders/
+CHANGELOG.md    merge=union
+
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+# For the following file types, normalize line endings to LF on
+# checkin and prevent conversion to CRLF when they are checked out
+# (this is required in order to prevent newline related issues like,
+# for example, after the build script is run)
+
+*.*     text eol=lf
+*.php   text eol=lf
+*.css   text eol=lf
+*.html  text eol=lf
+*.js    text eol=lf
+*.json  text eol=lf
+*.md    text eol=lf
+*.sh    text eol=lf
+*.txt   text eol=lf
+*.xml   text eol=lf
+*.yml   text eol=lf
+
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+# Exclude the `.htaccess` file from GitHub's language statistics
+# https://github.com/github/linguist#using-gitattributes
+
+dist/.htaccess linguist-vendored
+
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+# Explicitly tell git to be aware of binary image files
+# (binary is a macro for -text -diff)
+*.png binary
+*.gif binary
+*.jpg binary
+*.jpeg binary
+
+# Explicitly tell git to be aware of binary font files
+# (binary is a macro for -text -diff)
+*.eot binary
+*.ttf binary
+*.otf binary
+*.woff binary
+*.woff2 binary
+
+# Explicitly tell git to be aware of additional binary files
+# (binary is a macro for -text -diff)
+*.gz binary
+*.zip binary
+*.7z binary
+*.bz2 binary
+
+# Documents
+*.doc  diff=astextplain
+*.DOC  diff=astextplain
+*.docx diff=astextplain
+*.DOCX diff=astextplain
+*.dot  diff=astextplain
+*.DOT  diff=astextplain
+*.pdf  diff=astextplain
+*.PDF  diff=astextplain
+*.rtf  diff=astextplain
+*.RTF  diff=astextplain

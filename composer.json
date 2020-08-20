@@ -1,0 +1,65 @@
+{
+    "name": "devnullius/yii2-sentry",
+    "description": "Yii2 integration for Sentry",
+    "keywords": [
+        "logging",
+        "errors",
+        "yii2",
+        "sentry",
+        "v2",
+        "sdk"
+    ],
+    "type": "library",
+    "license": "BSD-3-Clause",
+    "minimum-stability": "stable",
+    "support": {
+        "issues": "https://github.com/devnullius/yii2-sentry/issues",
+        "source": "https://github.com/devnullius/yii2-sentry"
+    },
+    "authors": [
+        {
+            "name": "Oleg Tsvetkov",
+            "email": "me@olegtsvetkov.com",
+            "homepage": "https://olegtsvetkov.com/",
+            "role": "Creator"
+        },
+        {
+            "name": "Sergei Iamskoi",
+            "email": "syamskoy@gmail.com",
+            "homepage": "https://iamskoi.com/",
+            "role": "Improver"
+        },
+        {
+            "name": "Aram Harutyunyan",
+            "email": "aram.ds@gmail.com",
+            "homepage": "https://ctrlf5.io/",
+            "role": "Improver"
+        }
+    ],
+    "config": {
+        "sort-packages": true
+    },
+    "require": {
+        "php": "^7.1",
+        "sentry/sentry": "^2.3.0",
+        "yiisoft/yii2": "~2.0.13"
+    },
+    "require-dev": {
+        "php-http/mock-client": "^1.0"
+    },
+    "suggest": {
+        "php-http/curl-client": "Recommended HTTP client for Sentry SDK",
+        "http-interop/http-factory-guzzle": "Recommended HTTP factory for Sentry SDK"
+    },
+    "autoload": {
+        "psr-4": {
+            "devnullius\\yii2\\sentry\\": "src/"
+        }
+    },
+    "repositories": [
+        {
+            "type": "composer",
+            "url": "https://asset-packagist.org"
+        }
+    ]
+}
