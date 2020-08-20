@@ -41,7 +41,7 @@
     },
     "require": {
         "php": "^7.1",
-        "sentry/sentry": "^2.4.0",
+        "sentry/sentry": "^2.4",
         "yiisoft/yii2": "~2.0.13"
     },
     "require-dev": {

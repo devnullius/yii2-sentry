@@ -1,6 +1,6 @@
 # yii2-sentry
 
-Yii2 integration for [Sentry](https://getsentry.com/) using Sentry PHP SDK v2.
+Yii2 integration for [Sentry](https://getsentry.com/) using Sentry PHP SDK v2(.4.3).
 
 Inspired by official [sentry/sentry-simfony](https://github.com/getsentry/sentry-symfony) and
 [sentry/sentry-laravel](https://github.com/getsentry/sentry-laravel) packages.
@@ -10,14 +10,9 @@ Inspired by official [sentry/sentry-simfony](https://github.com/getsentry/sentry
 The preferred way to install this package is through [composer](http://getcomposer.org/download/):
 
 ```bash
+composer require php-http/curl-client:^2.1
+composer require http-interop/http-factory-guzzle:^1.0
 composer require devnullius/yii2-sentry:^1.0
-```
-
-Package doesn't provide any HTTP transport out of the box. To install package with a recommended HTTP client use special 
-metapackage:
-
-```bash
-composer require devnullius/yii2-sentry-curl-client:^1.0
 ```
 
 ## Basic Usage
