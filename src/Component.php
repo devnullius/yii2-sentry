@@ -5,7 +5,10 @@ namespace devnullius\yii2\sentry;
 
 use Sentry\Breadcrumb;
 use Sentry\ClientBuilder;
+use Sentry\Integration\ErrorListenerIntegration;
 use Sentry\Integration\FatalErrorListenerIntegration;
+use Sentry\Integration\FrameContextifierIntegration;
+use Sentry\Integration\TransactionIntegration;
 use Sentry\Options;
 use Sentry\SentrySdk;
 use Sentry\State\Hub;
@@ -36,6 +39,9 @@ class Component extends \yii\base\Component implements BootstrapInterface
     public $integrations = [
         Integration::class,
         FatalErrorListenerIntegration::class,
+        TransactionIntegration::class,
+        FrameContextifierIntegration::class,
+        ErrorListenerIntegration::class,
     ];
     /**
      * @var string
