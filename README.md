@@ -1,6 +1,6 @@
 # yii2-sentry
 
-Yii2 integration for [Sentry](https://getsentry.com/) using Sentry PHP SDK v2(.5.0).
+Yii2 integration for [Sentry](https://getsentry.com/) using Sentry PHP SDK v3(.3.7).
 
 Inspired by official [sentry/sentry-simfony](https://github.com/getsentry/sentry-symfony) and
 [sentry/sentry-laravel](https://github.com/getsentry/sentry-laravel) packages.

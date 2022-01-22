@@ -37,11 +37,14 @@
         }
     ],
     "config": {
-        "sort-packages": true
+        "sort-packages": true,
+        "allow-plugins": {
+            "yiisoft/yii2-composer": false
+        }
     },
     "require": {
-        "php": "^7.1",
-        "sentry/sentry": "^2.4",
+        "php": ">=7.1",
+        "sentry/sentry": "^3.3",
         "yiisoft/yii2": "~2.0.13"
     },
     "require-dev": {
