@@ -135,7 +135,7 @@ class Integration implements IntegrationInterface
                     $requestData['data'] = $rawBody;
                 }
 
-                $event->getExtraContext()->setData([
+                $event->setExtra([
                     'decodedParams' => $bodyParams,
                 ]);
             }
@@ -156,12 +156,12 @@ class Integration implements IntegrationInterface
 
         foreach ($headers as $header => $value) {
             // Strip headers
-            if (in_array(strtolower($header), $this->stripHeaders, true)) {
+            if (in_array(strtolower((string)$header), $this->stripHeaders, true)) {
                 continue;
             }
 
             // Check fo PII in headers
-            if (in_array(strtolower($header), $this->piiHeaders, true)) {
+            if (in_array(strtolower((string)$header), $this->piiHeaders, true)) {
                 $result[$header] = $this->piiReplaceText;
             } else {
                 $result[$header] = $value;
