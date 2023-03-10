@@ -5,23 +5,31 @@ namespace devnullius\yii2\sentry;
 
 use Sentry\Breadcrumb;
 use Sentry\ClientBuilder;
+use Sentry\Integration\EnvironmentIntegration;
 use Sentry\Integration\ErrorListenerIntegration;
 use Sentry\Integration\FatalErrorListenerIntegration;
 use Sentry\Integration\FrameContextifierIntegration;
+use Sentry\Integration\ModulesIntegration;
+use Sentry\Integration\RequestIntegration;
 use Sentry\Integration\TransactionIntegration;
 use Sentry\Options;
 use Sentry\SentrySdk;
 use Sentry\State\Hub;
 use Sentry\State\HubInterface;
 use Sentry\State\Scope;
+use Sentry\Tracing\SpanContext;
+use Sentry\Tracing\TransactionContext;
 use Yii;
 use yii\base\ActionEvent;
 use yii\base\BootstrapInterface;
 use yii\base\Controller;
 use yii\base\Event;
 use yii\base\InlineAction;
+use yii\httpclient\Client;
+use yii\httpclient\RequestEvent;
 use yii\web\User;
 use yii\web\UserEvent;
+use function Sentry\startTransaction;
 
 class Component extends \yii\base\Component implements BootstrapInterface
 {
@@ -42,6 +50,12 @@ class Component extends \yii\base\Component implements BootstrapInterface
         TransactionIntegration::class,
         FrameContextifierIntegration::class,
         ErrorListenerIntegration::class,
+
+        EnvironmentIntegration::class,
+        //ExceptionListenerIntegration::class,
+        FrameContextifierIntegration::class,
+        ModulesIntegration::class,
+        RequestIntegration::class,
     ];
     /**
      * @var string
@@ -112,8 +126,56 @@ class Component extends \yii\base\Component implements BootstrapInterface
             });
         });
 
-        Event::on(Controller::class, Controller::EVENT_BEFORE_ACTION, function (ActionEvent $event) use ($app) {
+        //Event::on(Controller::class, Controller::EVENT_BEFORE_ACTION, function (ActionEvent $event) use ($app) {
+        //    $route = $event->action->getUniqueId();
+        //
+        //    $metadata = [];
+        //    // Retrieve action's function
+        //    if ($app->requestedAction instanceof InlineAction) {
+        //        $metadata['action'] = get_class($app->requestedAction->controller) . '::' . $app->requestedAction->actionMethod . '()';
+        //    } else {
+        //        $metadata['action'] = get_class($app->requestedAction) . '::run()';
+        //    }
+        //
+        //    // Set breadcrumb
+        //    $this->hub->addBreadcrumb(new Breadcrumb(
+        //        Breadcrumb::LEVEL_INFO,
+        //        Breadcrumb::TYPE_NAVIGATION,
+        //        'route',
+        //        $route,
+        //        $metadata
+        //    ));
+        //
+        //    // Set "route" tag
+        //    $this->hub->configureScope(function (Scope $scope) use ($route): void {
+        //        $scope->setTag('route', $route);
+        //    });
+        //});
+
+        $transaction = null;
+        $span = null;
+
+        Event::on(Controller::class, Controller::EVENT_BEFORE_ACTION, function (ActionEvent $event) use ($app, &$transaction, &$span) {
             $route = $event->action->getUniqueId();
+
+            $transactionContext = new TransactionContext();
+            $transactionContext->setName($event->sender->id);
+            $transactionContext->setOp($route);
+
+            $transaction = startTransaction($transactionContext);
+
+            // Set the current transaction as the current span so we can retrieve it later
+            SentrySdk::getCurrentHub()->setSpan($transaction);
+
+            // Setup the context for the expensive operation span
+            $spanContext = new SpanContext();
+            $spanContext->setOp($route);
+
+            // Start the span
+            $span = $transaction->startChild($spanContext);
+
+            // Set the current span to the span we just started
+            SentrySdk::getCurrentHub()->setSpan($span);
 
             $metadata = [];
             // Retrieve action's function
@@ -137,6 +199,51 @@ class Component extends \yii\base\Component implements BootstrapInterface
                 $scope->setTag('route', $route);
             });
         });
+
+        Event::on(Controller::class, Controller::EVENT_AFTER_ACTION, function (ActionEvent $event) use ($app, &$transaction, &$span) {
+            $span->finish();
+
+            // Set the current span back to the transaction since we just finished the previous span
+            SentrySdk::getCurrentHub()->setSpan($transaction);
+
+            // Finish the transaction, this submits the transaction and it's span to Sentry
+            $transaction->finish();
+        });
+
+        if (class_exists(Client::class)) {
+            $httpClientTransaction = null;
+            $httpClientSpan = null;
+            Event::on(Client::class, Client::EVENT_BEFORE_SEND, function (RequestEvent $event) use ($app, &$httpClientTransaction, &$httpClientSpan) {
+                $transactionContext = new TransactionContext();
+                $transactionContext->setName($event->sender->baseUrl);
+                $transactionContext->setOp($event->request->fullUrl);
+
+                $httpClientTransaction = startTransaction($transactionContext);
+
+                // Set the current transaction as the current span so we can retrieve it later
+                SentrySdk::getCurrentHub()->setSpan($httpClientTransaction);
+
+                // Setup the context for the expensive operation span
+                $spanContext = new SpanContext();
+                $spanContext->setOp($event->request->fullUrl);
+
+                // Start the span
+                $httpClientSpan = $httpClientTransaction->startChild($spanContext);
+
+                // Set the current span to the span we just started
+                SentrySdk::getCurrentHub()->setSpan($httpClientSpan);
+            });
+
+            Event::on(Client::class, Client::EVENT_AFTER_SEND, function (RequestEvent $event) use ($app, &$httpClientTransaction, &$httpClientSpan) {
+                $httpClientSpan->finish();
+
+                // Set the current span back to the transaction since we just finished the previous span
+                SentrySdk::getCurrentHub()->setSpan($httpClientTransaction);
+
+                // Finish the transaction, this submits the transaction and it's span to Sentry
+                $httpClientTransaction->finish();
+            });
+        }
     }
 
     public function getHub(): HubInterface
