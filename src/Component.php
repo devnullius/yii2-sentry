@@ -215,8 +215,8 @@ class Component extends \yii\base\Component implements BootstrapInterface
             $httpClientSpan = null;
             Event::on(Client::class, Client::EVENT_BEFORE_SEND, function (RequestEvent $event) use ($app, &$httpClientTransaction, &$httpClientSpan) {
                 $transactionContext = new TransactionContext();
-                $transactionContext->setName($event->sender->baseUrl);
-                $transactionContext->setOp($event->request->fullUrl);
+                $transactionContext->setName($event->sender->baseUrl ?? 'remote.http.call');
+                $transactionContext->setOp($event->request->fullUrl ?? 'remote.http.url');
 
                 $httpClientTransaction = startTransaction($transactionContext);
 
@@ -225,7 +225,7 @@ class Component extends \yii\base\Component implements BootstrapInterface
 
                 // Setup the context for the expensive operation span
                 $spanContext = new SpanContext();
-                $spanContext->setOp($event->request->fullUrl);
+                $spanContext->setOp($event->request->fullUrl ?? 'remote.http.url');
 
                 // Start the span
                 $httpClientSpan = $httpClientTransaction->startChild($spanContext);
