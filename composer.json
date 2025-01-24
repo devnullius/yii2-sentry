@@ -39,14 +39,15 @@
     "config": {
         "sort-packages": true,
         "allow-plugins": {
+            "php-http/discovery": true,
             "yiisoft/yii2-composer": false
         }
     },
     "require": {
-        "php": ">=7.1 || ^8.0 || ^8.1",
-        "sentry/sentry": "^3.3",
-        "yiisoft/yii2": "~2.0.13",
-        "sentry/sdk": "^3.1",
+        "php": ">=7.1 || ^8.0 || ^8.1 || ^8.2 || ^8.3 || ^8.4 || ^8.5",
+        "sentry/sentry": "^4.10.0",
+        "yiisoft/yii2": "2.0.50.0",
+        "sentry/sdk": "^4.0.0",
         "symfony/psr-http-message-bridge": "^1.0 | ^2.0",
         "nyholm/psr7": "^1.0"
     },
