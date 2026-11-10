@@ -1,4 +1,5 @@
 Copyright © 2019 by Oleg Tsvetkov (http://olegtsvetkov.com)
+Copyright © 2020-2026 by Aram Harutyunyan (https://ctrlf5.io/)
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -11,7 +12,7 @@ are met:
    notice, this list of conditions and the following disclaimer in
    the documentation and/or other materials provided with the
    distribution.
- * Neither the name of Yii Software LLC nor the names of its
+ * Neither the name of the copyright holder nor the names of its
    contributors may be used to endorse or promote products derived
    from this software without specific prior written permission.
 
