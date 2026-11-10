@@ -126,6 +126,12 @@ class Integration implements IntegrationInterface
 
     protected function applyToEvent(Event $event, Options $options): void
     {
+        // With the SDK's data_collection option, the SDK's own RequestIntegration collects the request under that
+        // policy; adding the request here would send what the policy leaves out.
+        if ($options->getDataCollection() !== null) {
+            return;
+        }
+
         $request = Yii::$app !== null ? Yii::$app->getRequest() : null;
 
         // Skip if the current request is made via console.
@@ -157,6 +163,11 @@ class Integration implements IntegrationInterface
 
         try {
             $this->addRequestBody($event, $request, $options, $requestData);
+        } catch (Throwable $exception) {
+            // Without a "data" key, the SDK's RequestIntegration would add the raw body, unfiltered.
+            $requestData['data'] = 'Not available: the request body could not be read.';
+
+            throw $exception;
         } finally {
             // Keep the rest of the request data, even if reading the body failed.
             $event->setRequest($requestData);
@@ -164,7 +175,7 @@ class Integration implements IntegrationInterface
 
         if ($options->shouldSendDefaultPii()) {
             // Unlike REMOTE_ADDR, this is the client's IP behind the proxies listed in Request::$trustedHosts.
-            $this->addUserIpAddress($event, $request->getUserIP());
+            $this->addUserIpAddress($event, $request->getUserIP(), $request->getRemoteIP());
         }
     }
 
@@ -242,17 +253,25 @@ class Integration implements IntegrationInterface
             return;
         }
 
+        $filterFields = !$options->shouldSendDefaultPii() && $this->piiBodyFields !== [];
+        // No action is resolved yet when a request fails before routing, e.g. in bootstrap or "beforeRequest".
+        $action = Yii::$app->requestedAction;
+        $actionId = $action !== null ? $action->getUniqueId() : null;
+
+        if ($filterFields && $actionId === null) {
+            // No route's rules can be applied: leave the body out rather than send fields they may cover.
+            $requestData['data'] = 'Not available: the route was not resolved, so piiBodyFields could not be applied.';
+
+            return;
+        }
+
         $bodyParams = $request->getBodyParams();
         if (!is_array($bodyParams)) {
             // E.g. a JsonParser configured with asArray = false.
             $bodyParams = ArrayHelper::toArray($bodyParams);
         }
 
-        // No action is resolved yet when a request fails before routing, e.g. in bootstrap or "beforeRequest".
-        $action = Yii::$app->requestedAction;
-        $actionId = $action !== null ? $action->getUniqueId() : null;
-
-        if (!$options->shouldSendDefaultPii() && $actionId !== null && isset($this->piiBodyFields[$actionId])) {
+        if ($filterFields && isset($this->piiBodyFields[$actionId])) {
             $requestData['data'] = 'Not available due to PII. See "decodedParams" in Additional data block.';
 
             $this->removeKeysFromArrayRecursively($bodyParams, $this->piiBodyFields[$actionId]);
@@ -266,7 +285,7 @@ class Integration implements IntegrationInterface
         ]));
     }
 
-    private function addUserIpAddress(Event $event, ?string $ipAddress): void
+    private function addUserIpAddress(Event $event, ?string $ipAddress, ?string $remoteIp): void
     {
         if ($ipAddress === null || $ipAddress === '') {
             return;
@@ -276,7 +295,9 @@ class Integration implements IntegrationInterface
 
         if ($user === null) {
             $event->setUser(UserDataBag::createFromUserIpAddress($ipAddress));
-        } elseif ($user->getIpAddress() === null) {
+        } elseif ($user->getIpAddress() === null || $user->getIpAddress() === $remoteIp) {
+            // REMOTE_ADDR is the SDK's own fallback (with a reused client, the SDK's RequestIntegration runs first):
+            // replace it, but keep an address that was set explicitly.
             $user->setIpAddress($ipAddress);
         }
     }

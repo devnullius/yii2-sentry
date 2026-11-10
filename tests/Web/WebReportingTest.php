@@ -124,6 +124,44 @@ final class WebReportingTest extends WebServerTestCase
         $this->assertSame('[Filtered PII]', $headers['authorization'] ?? null);
     }
 
+    public function testABodyThatCannotBeParsedIsNotSentUnfiltered(): void
+    {
+        // piiBodyFields covers "password", but invalid JSON can't be filtered, and the SDK would add the raw body.
+        $response = $this->request('json_api', 'POST', '/site/post-log', ['Content-Type: application/json'], '{"password": "hunter2"');
+
+        $this->assertStringNotContainsString('hunter2', (string)json_encode($this->singleEvent($response)));
+    }
+
+    public function testTheBodyIsLeftOutWhenNoRouteRuleCanBeApplied(): void
+    {
+        // The request fails before routing, so the piiBodyFields rules for site/post-log can't be matched.
+        $response = $this->request('api_pii', 'POST', '/site/post-log', self::FORM, 'username=alice&password=hunter2');
+
+        $this->assertSame(500, $response['status']);
+        $this->assertStringNotContainsString('hunter2', (string)json_encode($this->singleEvent($response)));
+    }
+
+    public function testTheSdkDataCollectionPolicyIsHonored(): void
+    {
+        $response = $this->request('data_collection', 'POST', '/site/post-log', self::FORM, 'username=alice&password=hunter2');
+
+        $this->assertStringNotContainsString('hunter2', (string)json_encode($this->singleEvent($response)));
+    }
+
+    public function testTheDataCollectionPolicyOfAReusedClientIsHonored(): void
+    {
+        $response = $this->request('existing_hub_data_collection', 'POST', '/site/post-log', self::FORM, 'username=alice&password=hunter2');
+
+        $this->assertStringNotContainsString('hunter2', (string)json_encode($this->singleEvent($response)));
+    }
+
+    public function testAReusedClientGetsTheVisitorIpBehindATrustedProxy(): void
+    {
+        $response = $this->request('existing_hub_pii', 'GET', '/site/log-error', ['X-Forwarded-For: 198.51.100.23']);
+
+        $this->assertSame('198.51.100.23', $this->singleEvent($response)['user']['ip_address'] ?? null);
+    }
+
     public function testProxyHeadersAreFilteredByDefault(): void
     {
         $response = $this->request('trusted_proxy', 'POST', '/site/post-log', array_merge(self::FORM, [

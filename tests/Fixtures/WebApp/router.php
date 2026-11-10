@@ -24,12 +24,18 @@ define('YII_ENV', 'prod');
 
 require dirname(__DIR__, 3) . '/vendor/autoload.php';
 
-if ($scenario === 'existing_hub') {
+if (strpos($scenario, 'existing_hub') === 0) {
     // Like an app that sets up Sentry right after Composer's autoloader, before Yii exists (GitHub issue #1).
-    \Sentry\init([
+    $sentryOptions = [
         'dsn' => 'https://public@sentry.example.com/1',
         'transport' => new devnullius\yii2\sentry\tests\Support\RecordingTransport("$outDir/" . ($run !== '' ? $run : 'unnamed') . '.jsonl'),
-    ]);
+    ];
+    if ($scenario === 'existing_hub_pii') {
+        $sentryOptions['send_default_pii'] = true;
+    } elseif ($scenario === 'existing_hub_data_collection') {
+        $sentryOptions['data_collection'] = ['http_bodies' => []];
+    }
+    \Sentry\init($sentryOptions);
 }
 
 require dirname(__DIR__, 3) . '/vendor/yiisoft/yii2/Yii.php';

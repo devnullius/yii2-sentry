@@ -57,15 +57,35 @@ return static function (string $scenario, string $outDir, string $run): array {
             $sentry['integrations'] = $withIntegration($integration);
             break;
         case 'existing_hub':
+        case 'existing_hub_data_collection':
             // The client comes from \Sentry\init() in router.php.
             $sentry = ['class' => Component::class, 'useExistingHub' => true];
+            break;
+        case 'existing_hub_pii':
+            $sentry = ['class' => Component::class, 'useExistingHub' => true];
+            $request['trustedHosts'] = ['127.0.0.1'];
+            break;
+        case 'data_collection':
+            $sentry['sentrySettings']['data_collection'] = ['http_bodies' => []];
+            break;
+        case 'json_api':
+            $request['parsers'] = ['application/json' => yii\web\JsonParser::class];
+            $integration = new Integration();
+            $integration->piiBodyFields = ['site/post-log' => ['password']];
+            $sentry['integrations'] = $withIntegration($integration);
             break;
         case 'trusted_proxy':
             // Typical production: the app sits behind a load balancer that Yii trusts.
             $request['trustedHosts'] = ['127.0.0.1'];
             break;
         case 'api':
+        case 'api_pii':
             // API-style app: no error action, and a failure before any action is resolved.
+            if ($scenario === 'api_pii') {
+                $integration = new Integration();
+                $integration->piiBodyFields = ['site/post-log' => ['password']];
+                $sentry['integrations'] = $withIntegration($integration);
+            }
             $errorAction = null;
             $events['on beforeRequest'] = static function (): void {
                 if (Yii::$app->getRequest()->getIsPost()) {
