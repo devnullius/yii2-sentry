@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
-## [4.1.0] - Unreleased
+## [4.1.0] - 2026-11-10
 
 ### Security
 
@@ -88,7 +88,7 @@ All notable changes to this project are documented here. The format is based on
 
 [#1]: https://github.com/devnullius/yii2-sentry/issues/1
 [#2]: https://github.com/devnullius/yii2-sentry/pull/2
-[4.1.0]: https://github.com/devnullius/yii2-sentry/compare/4.0.1...HEAD
+[4.1.0]: https://github.com/devnullius/yii2-sentry/compare/4.0.1...4.1.0
 [4.0.1]: https://github.com/devnullius/yii2-sentry/compare/4.0.0...4.0.1
 [4.0.0]: https://github.com/devnullius/yii2-sentry/compare/1.9.3...4.0.0
 [1.9.0]: https://github.com/devnullius/yii2-sentry/compare/1.0.5...1.9.0
