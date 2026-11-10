@@ -110,6 +110,20 @@ final class WebReportingTest extends WebServerTestCase
         $this->singleEvent($response);
     }
 
+    public function testReusesASentryClientSetUpBeforeYii(): void
+    {
+        $response = $this->request('existing_hub', 'GET', '/site/throw', ['Authorization: Bearer secret']);
+
+        // Reported once: Yii's error handler replaces the SDK's exception handler when the app starts.
+        $event = $this->singleEvent($response);
+        $exceptions = $event['exception']['values'] ?? [];
+        $this->assertSame('boom from site/throw', end($exceptions)['value'] ?? null);
+        $this->assertSame('site/throw', $event['tags']['route'] ?? null);
+        // This package's request data is applied (the SDK's own filter would write "[Filtered]").
+        $headers = array_change_key_case($event['request']['headers'] ?? [], CASE_LOWER);
+        $this->assertSame('[Filtered PII]', $headers['authorization'] ?? null);
+    }
+
     public function testProxyHeadersAreFilteredByDefault(): void
     {
         $response = $this->request('trusted_proxy', 'POST', '/site/post-log', array_merge(self::FORM, [

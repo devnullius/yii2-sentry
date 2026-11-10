@@ -56,6 +56,10 @@ return static function (string $scenario, string $outDir, string $run): array {
             $integration->piiBodyFields = ['site/post-log' => ['profile' => ['phone']]];
             $sentry['integrations'] = $withIntegration($integration);
             break;
+        case 'existing_hub':
+            // The client comes from \Sentry\init() in router.php.
+            $sentry = ['class' => Component::class, 'useExistingHub' => true];
+            break;
         case 'trusted_proxy':
             // Typical production: the app sits behind a load balancer that Yii trusts.
             $request['trustedHosts'] = ['127.0.0.1'];
