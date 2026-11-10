@@ -227,7 +227,16 @@ Configure the package's `Integration`. As setting `integrations` replaces the de
 ```
 
 Field names match exactly and from the top of the body: list nested fields under their parent, as above. When a route
-has `piiBodyFields`, `request.data` holds a placeholder and the filtered fields are in `decodedParams`.
+has `piiBodyFields`, `request.data` holds a placeholder and the filtered fields are in `decodedParams`. The body is
+left out entirely when it can't be parsed, and, while `piiBodyFields` is configured, when the request fails before its
+route is resolved, since no route's rules can be applied then.
+
+### The SDK's `data_collection` option
+
+Sentry PHP SDK 4.33 added a `data_collection` option, which replaces `send_default_pii` with finer-grained controls.
+When it is set, in `sentrySettings` or on a client reused with `useExistingHub`, this package leaves the request to the
+SDK's `RequestIntegration`, which applies that policy: `stripHeaders`, `piiHeaders` and `piiBodyFields` don't apply,
+and `decodedParams` is not added. Keep `RequestIntegration` in `integrations` in that case.
 
 ## Console applications and queue workers
 
@@ -278,7 +287,8 @@ Then let the component reuse that client:
 
 The SDK options and integrations then come from your `\Sentry\init()` call: the component's `dsn`, `sentrySettings`
 and SDK integrations are ignored, while this package's `Integration` (request data and personal-data filtering), the
-route tag, breadcrumbs and user ID are still added. Once Yii starts, its error handler takes over uncaught exceptions,
+route tag, breadcrumbs and user ID are still added. If that call sets the SDK's `data_collection` option, the request is
+left to the SDK (see [The SDK's `data_collection` option](#the-sdks-data_collection-option)). Once Yii starts, its error handler takes over uncaught exceptions,
 so they are still reported once. Without a client set up beforehand, the component creates one as usual.
 
 ## Performance monitoring

@@ -13,6 +13,9 @@ All notable changes to this project are documented here. The format is based on
 - The `Proxy-Authorization`, `X-Forwarded-For` and `X-Real-IP` headers are now filtered by default.
 - A client could prevent an error from being reported by sending a body that did not match the nested
   `piiBodyFields` rules (for example a string where an array was expected). Such bodies are now handled.
+- The SDK's `data_collection` option (SDK 4.33 and later) was ignored for request data, so headers and bodies that it
+  leaves out were still sent. When it is configured, the request is now left to the SDK's `RequestIntegration`, which
+  applies it.
 
 ### Fixed
 
@@ -23,7 +26,8 @@ All notable changes to this project are documented here. The format is based on
 - On POST, PUT and PATCH requests, the additional data set elsewhere (such as `LogTarget`'s `logs`, `traces`,
   `real_body` and `real_time`) was replaced by `decodedParams`. They are now merged.
 - Events were dropped when a request with a body failed before an action was resolved, for example in bootstrap or
-  `beforeRequest` in an application without an error action.
+  `beforeRequest` in an application without an error action. While `piiBodyFields` is configured, the body of such a
+  request is left out, since no route's rules can be applied.
 - Events were dropped when the request body could not be parsed (for example invalid JSON with `JsonParser`). The
   event is now sent without the body and the failure is logged as a warning.
 - The `route` tag was overwritten by the error action (`site/error` on every exception in production) and by nested
