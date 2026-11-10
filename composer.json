@@ -52,7 +52,9 @@
         "nyholm/psr7": "^1.0"
     },
     "require-dev": {
-        "php-http/mock-client": "^1.0"
+        "phpstan/phpstan": "^1.12 || ^2.1",
+        "phpunit/phpunit": "^9.6.38",
+        "yiisoft/yii2-httpclient": "^2.0.15"
     },
     "suggest": {
         "php-http/curl-client": "Recommended HTTP client for Sentry SDK",
@@ -62,6 +64,15 @@
         "psr-4": {
             "devnullius\\yii2\\sentry\\": "src/"
         }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "devnullius\\yii2\\sentry\\tests\\": "tests/"
+        }
+    },
+    "scripts": {
+        "test": "phpunit",
+        "analyse": "phpstan analyse --memory-limit=1G"
     },
     "repositories": [
         {
