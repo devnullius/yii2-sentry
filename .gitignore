@@ -251,6 +251,8 @@ composer.lock
 
 # phpstorm project files
 .idea
+# local MCP server config (PhpStorm)
+/.mcp.json
 
 # netbeans project files
 nbproject
