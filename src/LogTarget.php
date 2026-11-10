@@ -16,9 +16,9 @@ use yii\log\Target;
 class LogTarget extends Target
 {
     /**
-     * Name of the Sentry component to pass logs
+     * The Sentry component to pass logs to, or its application component ID.
      *
-     * @var Component
+     * @var Component|string
      */
     public $component = 'sentry';
 
@@ -27,6 +27,24 @@ class LogTarget extends Target
         parent::init();
 
         $this->component = Instance::ensure($this->component, Component::class);
+        // The package logs its own failures (e.g. while adding request data to an event); those must not be sent
+        // through the component that is failing.
+        $this->except[] = 'devnullius\yii2\sentry\*';
+    }
+
+    /**
+     * Yii's default prefix holds the client IP, user ID and session ID. A session ID is a credential, so the default
+     * prefix is only kept when the SDK may send personal data (`send_default_pii`). A custom [[prefix]] is used as is.
+     *
+     * {@inheritdoc}
+     */
+    public function getMessagePrefix($message)
+    {
+        if ($this->prefix !== null || $this->shouldSendDefaultPii()) {
+            return parent::getMessagePrefix($message);
+        }
+
+        return '';
     }
 
     /**
@@ -131,5 +149,12 @@ class LogTarget extends Target
     {
         // Mute context
         return '';
+    }
+
+    private function shouldSendDefaultPii(): bool
+    {
+        $client = $this->component->getHub()->getClient();
+
+        return $client !== null && $client->getOptions()->shouldSendDefaultPii();
     }
 }
