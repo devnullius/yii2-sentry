@@ -37,6 +37,30 @@ final class SiteController extends Controller
         throw new RuntimeException('boom from site/throw');
     }
 
+    public function actionLogTwo(): string
+    {
+        Yii::error('first distinct problem', 'app');
+        Yii::error('second distinct problem', 'app');
+
+        return 'logged two';
+    }
+
+    public function actionWarning(): string
+    {
+        $values = [];
+
+        return 'value: ' . $values['missing']; // PHP 8: E_WARNING "Undefined array key"
+    }
+
+    public function actionFatal(): void
+    {
+        ini_set('memory_limit', '64M');
+        $chunks = [];
+        while (true) {
+            $chunks[] = str_repeat('x', 1024 * 1024);
+        }
+    }
+
     public function actionPostLog(): string
     {
         Yii::warning('suspicious thing during POST', 'app');

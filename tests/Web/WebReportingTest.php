@@ -21,14 +21,54 @@ final class WebReportingTest extends WebServerTestCase
         $this->assertSame(200, $response['status'], $response['body']);
     }
 
-    public function testPostRequestsKeepTheLogContextInExtras(): void
+    public function testPostRequestsIncludeTheParsedBody(): void
     {
         $response = $this->request('default', 'POST', '/site/post-log', self::FORM, 'username=alice');
 
-        $extra = $this->singleEvent($response)['extra'] ?? [];
-        foreach (['logs', 'traces', 'real_body', 'real_time', 'decodedParams'] as $key) {
-            $this->assertArrayHasKey($key, $extra, "extra.$key is missing");
-        }
+        $this->assertSame(['username' => 'alice'], $this->singleEvent($response)['extra']['decodedParams'] ?? null);
+    }
+
+    public function testEachLoggedErrorIsItsOwnEvent(): void
+    {
+        $response = $this->request('default', 'GET', '/site/log-two');
+
+        $this->assertSame(['first distinct problem', 'second distinct problem'], array_column($response['events'], 'message'));
+    }
+
+    public function testAPhpWarningIsReportedOnce(): void
+    {
+        $response = $this->request('default', 'GET', '/site/warning');
+
+        $exceptions = $this->singleEvent($response)['exception']['values'] ?? [];
+        $this->assertSame('yii\base\ErrorException', end($exceptions)['type'] ?? null);
+    }
+
+    public function testAFatalErrorIsReportedOnce(): void
+    {
+        $response = $this->request('default', 'GET', '/site/fatal');
+
+        $exceptions = $this->singleEvent($response)['exception']['values'] ?? [];
+        $this->assertStringContainsString('Allowed memory size', end($exceptions)['value'] ?? '');
+    }
+
+    public function testAnUncaughtExceptionIsMarkedUnhandled(): void
+    {
+        $response = $this->request('default', 'GET', '/site/throw');
+
+        $exceptions = $this->singleEvent($response)['exception']['values'] ?? [];
+        $this->assertFalse(end($exceptions)['mechanism']['handled'] ?? null);
+    }
+
+    public function testWithSendDefaultPiiAUserRestoredFromTheSessionIsAttached(): void
+    {
+        $login = $this->request('pii_on', 'GET', '/site/login');
+        $this->assertNotNull($login['sessionCookie']);
+
+        // Identity restored from the session: Yii does not trigger its login event on this request.
+        $response = $this->request('pii_on', 'GET', '/site/warn-then-throw', ['Cookie: ' . $login['sessionCookie']]);
+
+        $crash = $response['events'][count($response['events']) - 1] ?? [];
+        $this->assertSame(42, $crash['user']['id'] ?? null);
     }
 
     public function testExceptionsAreTaggedWithTheRouteThatFailed(): void
@@ -55,11 +95,14 @@ final class WebReportingTest extends WebServerTestCase
 
         $response = $this->request('default', 'GET', '/site/warn-then-throw', ['Cookie: ' . $login['sessionCookie']]);
 
-        $logs = implode("\n", (array)($this->singleEvent($response)['extra']['logs'] ?? []));
-        $this->assertStringContainsString('minor issue before the crash', $logs);
-        $this->assertStringNotContainsString($sessionId, $logs, 'A session ID in Sentry allows session hijacking.');
-        $this->assertStringNotContainsString('127.0.0.1', $logs);
-        $this->assertStringNotContainsString('[42]', $logs);
+        // The warning is an event of its own and a breadcrumb of the crash that follows it.
+        $this->assertCount(2, $response['events']);
+        $crash = $response['events'][1];
+        $breadcrumbs = (string)json_encode($crash['breadcrumbs']['values'] ?? []);
+        $this->assertStringContainsString('minor issue before the crash', $breadcrumbs);
+        $this->assertStringNotContainsString('127.0.0.1', $breadcrumbs);
+        $this->assertStringNotContainsString('[42]', $breadcrumbs);
+        $this->assertStringNotContainsString($sessionId, (string)json_encode($response['events']), 'A session ID in Sentry allows session hijacking.');
     }
 
     public function testSendDefaultPiiWithTracingKeepsServingAndReporting(): void
