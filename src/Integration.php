@@ -11,64 +11,116 @@ use Sentry\State\Scope;
 use Sentry\UserDataBag;
 use Throwable;
 use Yii;
+use yii\base\Application;
 use yii\helpers\ArrayHelper;
 use yii\web\Request;
+use yii\web\Session;
+use yii\web\User;
 use function in_array;
 
 /**
- * Adds the current Yii web request to Sentry events, with control over personal data in headers and the body.
+ * Adds the current Yii web request to Sentry events, and keeps secrets and personal data out of events: out of the
+ * request (body, query string, headers and cookies), out of the function arguments in stack traces, and out of
+ * database error messages.
+ *
+ * Secrets are scrubbed even when the SDK's `send_default_pii` option is on; personal data is hidden while it is off.
+ * With the SDK's `data_collection` option, the SDK collects the request and function arguments under that policy
+ * instead, and only database errors are masked here.
  */
 class Integration implements IntegrationInterface
 {
     /**
-     * List of HTTP methods for whom the request body must be passed to the Sentry
-     *
-     * @var string[]
+     * The default [[secretFields]].
      */
-    public $httpMethodsWithRequestBody = ['POST', 'PUT', 'PATCH'];
+    public const SECRET_FIELDS = [
+        'password', 'passwd', 'passphrase', 'pwd', 'secret', 'token', 'auth', 'authorization', 'authentication',
+        'authkey', 'apikey', 'accesskey', 'privatekey', 'key', 'jwt', 'bearer', 'sso', 'saml', 'csrf', 'xsrf',
+        'credential', 'session', 'sessid', 'sid', 'identity', 'signature', 'otp', 'totp', 'pin',
+        'card', 'creditcard', 'cardnumber', 'cvv', 'cvc', 'securitycode',
+    ];
+
     /**
-     * List of headers, that should be stripped. Use lower case.
-     *
-     * @var string[]
+     * The default [[personalFields]].
      */
-    public $stripHeaders = ['cookie', 'set-cookie'];
+    public const PERSONAL_FIELDS = [
+        'email', 'mail', 'phone', 'mobile', 'tel', 'fax', 'firstname', 'lastname', 'surname', 'fullname',
+        'middlename', 'address', 'street', 'postcode', 'postalcode', 'zipcode', 'zip', 'birth', 'dob', 'iban',
+        'bankaccount', 'accountnumber', 'passport', 'nationalid', 'ssn', 'socialsecurity', 'taxid', 'ip',
+    ];
+
     /**
-     * List of headers, that can contain Personal data. Use lower case.
-     *
-     * The defaults cover credentials and the visitor's IP address as forwarded by proxies.
-     *
-     * @var string[]
+     * Sent instead of a request body that is left out, with the reason.
      */
-    public $piiHeaders = ['authorization', 'proxy-authorization', 'x-forwarded-for', 'x-real-ip', 'remote_addr'];
+    private const NOT_SENT = '[not sent: %s]';
+
     /**
-     * List of routes with keys, that must be stripped from request body
-     * For example:
+     * @var bool Scrub secrets: the values of fields, query parameters, headers, cookies and function arguments whose
+     * names are in [[secretFields]], and Yii's session, CSRF and identity cookies. Secrets are scrubbed even when the
+     * SDK's `send_default_pii` option is on.
+     */
+    public $scrubSecrets = true;
+    /**
+     * @var string[] Names of fields that hold secrets. Case and separators don't matter. A name of five characters
+     * or more matches anywhere ("token" matches "accessToken"), a shorter one only as a whole word ("key" matches
+     * "api_key" and "apiKey", not "monkey"). To add names, merge them with the defaults:
+     * `array_merge(Integration::SECRET_FIELDS, ['my_name'])`.
+     */
+    public $secretFields = self::SECRET_FIELDS;
+    /**
+     * @var bool|null Hide personal data: the values of fields, query parameters, headers and function arguments whose
+     * names are in [[personalFields]] or [[piiBodyFields]], and the headers in [[piiHeaders]]. By default (null),
+     * it is hidden while the SDK's `send_default_pii` option is off; `true` always hides it, `false` never does.
+     * The visitor's IP address and cookies are only sent with `send_default_pii`.
+     */
+    public $scrubPersonalData;
+    /**
+     * @var string[] Names of fields that hold personal data, matched like [[secretFields]].
+     */
+    public $personalFields = self::PERSONAL_FIELDS;
+    /**
+     * More personal data fields, for the request body of specific routes; hidden like [[personalFields]].
+     *
+     * A name is matched like the names in [[personalFields]], at any depth of the body. A name with a list limits
+     * the names to the fields under it:
      *
      * ```php
      * [
-     *     'controller/action' => [
-     *         'field_1',
-     *     ],
-     *     'account/login' => [
-     *         'email',
-     *         'password',
-     *     ],
-     *     // Nested fields, e.g. the ones posted by a Yii ActiveForm as LoginForm[password]
-     *     'site/login' => [
-     *         'LoginForm' => [
-     *             'password',
-     *         ],
-     *     ],
+     *     'account/register' => ['nickname', 'company'],
+     *     // Only the "nickname" posted by a Yii ActiveForm as Profile[nickname].
+     *     'account/profile' => ['Profile' => ['nickname']],
      * ]
      * ```
      *
-     * @var array
+     * When a request fails before its route is known, e.g. in bootstrap, the body is left out.
+     *
+     * @var array<string, array<array-key, mixed>>
      */
     public $piiBodyFields = [];
     /**
-     * String to replace PII with.
-     *
-     * @var string|null
+     * @var string[] Headers that hold personal data (the visitor's IP address, as forwarded by proxies), hidden like
+     * [[personalFields]]. Headers named after the [[personalFields]] are hidden too. Lower case.
+     */
+    public $piiHeaders = ['forwarded', 'x-forwarded-for', 'x-real-ip', 'remote_addr'];
+    /**
+     * @var string[] Headers that are never sent. Lower case. The cookies are sent apart, with `send_default_pii`.
+     */
+    public $stripHeaders = ['cookie', 'set-cookie'];
+    /**
+     * @var bool Send request bodies that can't be read as fields (XML, plain text, invalid JSON) as text. Secrets and
+     * personal data in them can't be found, so they are sent as they are.
+     */
+    public $sendUnparsedBodies = false;
+    /**
+     * @var string[] HTTP methods whose request body is sent.
+     */
+    public $httpMethodsWithRequestBody = ['POST', 'PUT', 'PATCH'];
+    /**
+     * @var bool Replace the values in database error messages (of `yii\db\Exception` and `PDOException`) with "?",
+     * e.g. "Duplicate entry ? for key 'email'". Names of tables, columns and keys are kept.
+     */
+    public $maskDatabaseErrors = true;
+    /**
+     * @var string|null Replaces scrubbed values.
      */
     public $piiReplaceText = '[Filtered PII]';
 
@@ -78,6 +130,11 @@ class Integration implements IntegrationInterface
      * @var Options|null
      */
     protected $options;
+
+    /**
+     * @var Scrubber|null the scrubber for the event being processed
+     */
+    private $scrubber;
 
     /**
      * {@inheritdoc}
@@ -108,17 +165,32 @@ class Integration implements IntegrationInterface
     }
 
     /**
-     * Adds the current request to the event.
+     * Adds the current request to the event, and scrubs secrets and personal data from it.
      *
-     * This runs while errors are being reported, so it never throws: on failure, the event is kept as it is and the
-     * failure is logged as a warning.
+     * This runs while errors are being reported, so it never throws. Each part is done even if another one fails; a
+     * failure leaves that part of the event as it was, and is logged as a warning.
      */
     public function processEvent(Event $event, Options $options): Event
     {
-        try {
+        $type = (string)$event->getType();
+        if ($type !== 'event' && $type !== 'transaction') {
+            return $event;
+        }
+
+        $this->scrubber = null;
+
+        self::attempt('add the request to', function () use ($event, $options): void {
             $this->applyToEvent($event, $options);
-        } catch (Throwable $exception) {
-            Yii::warning('Unable to add the request to the Sentry event: ' . $exception, __METHOD__);
+        });
+        if ($options->getDataCollection() === null) {
+            self::attempt('scrub the function arguments in', function () use ($event, $options): void {
+                $this->scrubFunctionArguments($event, $this->scrubber($options));
+            });
+        }
+        if ($this->maskDatabaseErrors) {
+            self::attempt('mask the database errors in', static function () use ($event): void {
+                self::maskDatabaseErrorsIn($event);
+            });
         }
 
         return $event;
@@ -139,37 +211,41 @@ class Integration implements IntegrationInterface
             return;
         }
 
-        $requestMethod = $request->getMethod();
-
-        $requestData = [
-            'url' => $this->getRequestUrl($request),
-            'method' => $requestMethod,
-            'query_string' => $request->getQueryString(),
-        ];
-
-        // Process headers, cookies, etc. Done the same way as in RequestIntegration, but using Yii's stuff.
-        /** @see \Sentry\Integration\RequestIntegration */
-        if ($options->shouldSendDefaultPii()) {
-            $remoteIp = $request->getRemoteIP();
-            if ($remoteIp !== null) {
-                $requestData['env']['REMOTE_ADDR'] = $remoteIp;
-            }
-
-            $requestData['cookies'] = $_COOKIE;
-            $requestData['headers'] = $request->getHeaders()->toArray();
-        } else {
-            $requestData['headers'] = $this->processHeaders($request->getHeaders()->toArray());
-        }
+        $scrubber = $this->scrubber($options);
+        $requestData = [];
 
         try {
-            $this->addRequestBody($event, $request, $options, $requestData);
+            $requestData['url'] = $this->getRequestUrl($request);
+            $requestData['method'] = $request->getMethod();
+            $requestData['query_string'] = $scrubber->scrubQueryString($request->getQueryString());
+            $requestData['headers'] = $this->processHeaders($request->getHeaders()->toArray());
+
+            if ($options->shouldSendDefaultPii()) {
+                $remoteIp = $request->getRemoteIP();
+                if ($remoteIp !== null) {
+                    $requestData['env']['REMOTE_ADDR'] = $remoteIp;
+                }
+
+                $requestData['cookies'] = $scrubber->scrub($_COOKIE);
+            }
+
+            // Like the SDK: request bodies are only relevant for errors.
+            if ((string)$event->getType() === 'event') {
+                $body = $this->requestBody($request, $options, $scrubber);
+                if ($body !== null) {
+                    $requestData['data'] = $body;
+                }
+            }
         } catch (Throwable $exception) {
-            // Without a "data" key, the SDK's RequestIntegration would add the raw body, unfiltered.
-            $requestData['data'] = 'Not available: the request body could not be read.';
+            // Without these, the SDK's RequestIntegration would add its own, unfiltered.
+            $requestData += ['query_string' => '', 'headers' => [], 'data' => sprintf(self::NOT_SENT, 'the request could not be read')];
+            if ($options->shouldSendDefaultPii()) {
+                $requestData += ['cookies' => []];
+            }
 
             throw $exception;
         } finally {
-            // Keep the rest of the request data, even if reading the body failed.
+            // Keep what could be read, even if reading the rest failed.
             $event->setRequest($requestData);
         }
 
@@ -197,23 +273,35 @@ class Integration implements IntegrationInterface
     }
 
     /**
+     * Leaves out the [[stripHeaders]], and scrubs secret headers, and personal data ones while personal data is
+     * hidden. The query string of the "Referer" header is scrubbed like the request's.
+     *
      * @param array $headers
      *
      * @return array
      */
     protected function processHeaders(array $headers): array
     {
+        $scrubber = $this->scrubber();
+        $stripHeaders = array_map('strtolower', $this->stripHeaders);
+        $piiHeaders = array_map('strtolower', $this->piiHeaders);
         $result = [];
 
         foreach ($headers as $header => $value) {
-            // Strip headers
-            if (in_array(strtolower((string)$header), $this->stripHeaders, true)) {
+            $name = strtolower((string)$header);
+
+            if (in_array($name, $stripHeaders, true)) {
                 continue;
             }
 
-            // Check for PII in headers
-            if (in_array(strtolower((string)$header), $this->piiHeaders, true)) {
+            // A Cookie header that is kept would carry the session ID.
+            $isSecret = $scrubber->isSecret($name) || ($this->scrubSecrets && ($name === 'cookie' || $name === 'set-cookie'));
+            $isPersonal = $scrubber->hidesPersonalData() && (in_array($name, $piiHeaders, true) || $scrubber->isPersonal($name));
+
+            if ($isSecret || $isPersonal) {
                 $result[$header] = $this->piiReplaceText;
+            } elseif ($name === 'referer') {
+                $result[$header] = is_array($value) ? array_map([$scrubber, 'scrubUrl'], array_map('strval', $value)) : $scrubber->scrubUrl((string)$value);
             } else {
                 $result[$header] = $value;
             }
@@ -240,49 +328,165 @@ class Integration implements IntegrationInterface
     }
 
     /**
-     * @param array<string, mixed> $requestData
+     * @return array<array-key, mixed>|string|null what to send as the body: its fields, its text, a note saying why
+     *                                             it is left out, or null when there is no body to send
      */
-    private function addRequestBody(Event $event, Request $request, Options $options, array &$requestData): void
+    private function requestBody(Request $request, Options $options, Scrubber $scrubber)
     {
-        if (!in_array($request->getMethod(), $this->httpMethodsWithRequestBody, true)) {
-            return;
-        }
-
         $rawBody = $request->getRawBody();
-        if ($rawBody === '') {
-            return;
+        // For a multipart form, PHP has read the body into $_POST and $_FILES, and the raw body is empty.
+        if ($rawBody === '' && $_POST === [] && $_FILES === []) {
+            return null;
         }
 
-        $filterFields = !$options->shouldSendDefaultPii() && $this->piiBodyFields !== [];
-        // No action is resolved yet when a request fails before routing, e.g. in bootstrap or "beforeRequest".
-        $action = Yii::$app->requestedAction;
-        $actionId = $action !== null ? $action->getUniqueId() : null;
-
-        if ($filterFields && $actionId === null) {
-            // No route's rules can be applied: leave the body out rather than send fields they may cover.
-            $requestData['data'] = 'Not available: the route was not resolved, so piiBodyFields could not be applied.';
-
-            return;
+        $limit = self::requestBodyLimit($options);
+        if ($limit === 0) {
+            return null;
         }
 
-        $bodyParams = $request->getBodyParams();
-        if (!is_array($bodyParams)) {
+        if (!in_array($request->getMethod(), $this->httpMethodsWithRequestBody, true)) {
+            return sprintf(self::NOT_SENT, $request->getMethod() . ' is not in httpMethodsWithRequestBody');
+        }
+
+        if ($limit !== null && strlen($rawBody) > $limit) {
+            return sprintf(self::NOT_SENT, 'larger than max_request_body_size');
+        }
+
+        $routeRules = [];
+        if ($scrubber->hidesPersonalData() && $this->piiBodyFields !== []) {
+            // No action is resolved yet when a request fails before routing, e.g. in bootstrap or "beforeRequest".
+            $action = Yii::$app !== null ? Yii::$app->requestedAction : null;
+            if ($action === null) {
+                return sprintf(self::NOT_SENT, 'the route is unknown, so piiBodyFields could not be applied');
+            }
+
+            $routeRules = $this->piiBodyFields[$action->getUniqueId()] ?? [];
+        }
+
+        try {
+            $fields = $this->bodyFields($request, $rawBody);
+        } catch (Throwable $exception) {
+            // E.g. Yii's JsonParser, on invalid JSON.
+            $fields = 'the body could not be parsed';
+        }
+
+        if (is_string($fields)) {
+            return $this->sendUnparsedBodies ? $rawBody : sprintf(self::NOT_SENT, $fields);
+        }
+
+        if ($rawBody === '' && $limit !== null && strlen(http_build_query($fields)) > $limit) {
+            return sprintf(self::NOT_SENT, 'larger than max_request_body_size');
+        }
+
+        return $this->scrubBody($fields, $scrubber, (array)$routeRules);
+    }
+
+    /**
+     * @return array<array-key, mixed>|string the body's fields, or why it can't be read as fields
+     */
+    private function bodyFields(Request $request, string $rawBody)
+    {
+        // The content type the way Yii looks up its parsers.
+        $contentType = (string)$request->getContentType();
+        $parameters = strpos($contentType, ';');
+        if ($parameters !== false) {
+            $contentType = substr($contentType, 0, $parameters);
+        }
+        $mediaType = strtolower(trim($contentType));
+
+        // Yii parses the body itself only with a parser, or when the form was posted: other bodies would come out
+        // as garbled fields, e.g. a JSON body as a single field named after its whole text.
+        $parsedByYii = isset($request->parsers[$contentType]) || isset($request->parsers['*']) || isset($_POST[$request->methodParam]);
+        $isForm = $mediaType === 'application/x-www-form-urlencoded' || ($mediaType === 'multipart/form-data' && $rawBody === '');
+
+        if ($parsedByYii || $isForm) {
+            $fields = $request->getBodyParams();
+
             // E.g. a JsonParser configured with asArray = false.
-            $bodyParams = ArrayHelper::toArray($bodyParams);
+            return is_array($fields) ? $fields : ArrayHelper::toArray($fields);
         }
 
-        if ($filterFields && isset($this->piiBodyFields[$actionId])) {
-            $requestData['data'] = 'Not available due to PII. See "decodedParams" in Additional data block.';
+        if ($mediaType === 'application/json' || preg_match('{^application/[^/;\s]+\+json$}', $mediaType) === 1) {
+            $fields = json_decode($rawBody, true);
 
-            $this->removeKeysFromArrayRecursively($bodyParams, $this->piiBodyFields[$actionId]);
-        } else {
-            $requestData['data'] = $rawBody;
+            return is_array($fields) ? $fields : 'the body is not a JSON object or array';
         }
 
-        // Merge: the scope's extras, e.g. the log context added by LogTarget, are already on the event.
-        $event->setExtra(array_merge($event->getExtra(), [
-            'decodedParams' => $bodyParams,
-        ]));
+        return 'the body is not form data or JSON';
+    }
+
+    /**
+     * @param array<array-key, mixed> $fields
+     * @param array<array-key, mixed> $routeRules
+     *
+     * @return array<array-key, mixed>
+     */
+    private function scrubBody(array $fields, Scrubber $scrubber, array $routeRules): array
+    {
+        $names = [];
+        $nested = [];
+        foreach ($routeRules as $key => $rule) {
+            if (is_string($key) && is_array($rule)) {
+                $nested[$key] = $rule;
+            } elseif (is_string($rule) || is_int($rule)) {
+                $names[] = (string)$rule;
+            }
+        }
+
+        if ($nested !== []) {
+            $this->removeKeysFromArrayRecursively($fields, $nested);
+        }
+
+        return $scrubber->scrub($fields, $names !== [] ? new FieldMatcher($names) : null);
+    }
+
+    private function scrubFunctionArguments(Event $event, Scrubber $scrubber): void
+    {
+        $stacktraces = [$event->getStacktrace()];
+        foreach ($event->getExceptions() as $exception) {
+            $stacktraces[] = $exception->getStacktrace();
+        }
+
+        foreach ($stacktraces as $stacktrace) {
+            if ($stacktrace === null) {
+                continue;
+            }
+
+            foreach ($stacktrace->getFrames() as $frame) {
+                $arguments = $frame->getVars();
+                if ($arguments !== []) {
+                    $frame->setVars($scrubber->scrub($arguments));
+                }
+            }
+        }
+    }
+
+    private static function maskDatabaseErrorsIn(Event $event): void
+    {
+        foreach ($event->getExceptions() as $exception) {
+            if (SqlMasker::isDatabaseError($exception->getType())) {
+                $exception->setValue(SqlMasker::maskErrorMessage($exception->getValue()));
+            }
+        }
+    }
+
+    /**
+     * @param Options|null $options without them, personal data is hidden
+     */
+    private function scrubber(?Options $options = null): Scrubber
+    {
+        if ($this->scrubber === null) {
+            $hidePersonalData = $this->scrubPersonalData ?? ($options === null || !$options->shouldSendDefaultPii());
+
+            $this->scrubber = new Scrubber(
+                $this->scrubSecrets ? new FieldMatcher($this->secretFields) : null,
+                $this->scrubSecrets ? self::yiiSecretNames() : [],
+                $hidePersonalData ? new FieldMatcher($this->personalFields) : null,
+                $this->piiReplaceText
+            );
+        }
+
+        return $this->scrubber;
     }
 
     private function addUserIpAddress(Event $event, ?string $ipAddress, ?string $remoteIp): void
@@ -299,6 +503,91 @@ class Integration implements IntegrationInterface
             // REMOTE_ADDR is the SDK's own fallback (with a reused client, the SDK's RequestIntegration runs first):
             // replace it, but keep an address that was set explicitly.
             $user->setIpAddress($ipAddress);
+        }
+    }
+
+    /**
+     * The names Yii keeps secrets under, as the application configures them: the session cookie, the CSRF cookie and
+     * form field, and the identity cookie of "remember me" logins.
+     *
+     * @return string[]
+     */
+    private static function yiiSecretNames(): array
+    {
+        $names = [];
+
+        $sessionName = session_name();
+        if ($sessionName !== false) {
+            $names[] = $sessionName;
+        }
+
+        $app = Yii::$app;
+        if ($app === null) {
+            return $names;
+        }
+
+        $request = $app->getRequest();
+        if ($request instanceof Request) {
+            $names[] = $request->csrfParam;
+        }
+
+        $names[] = self::componentSetting($app, 'session', ['name'], static function ($session): ?string {
+            return $session instanceof Session ? $session->getName() : null;
+        });
+        $names[] = self::componentSetting($app, 'user', ['identityCookie', 'name'], static function ($user): ?string {
+            return $user instanceof User ? ($user->identityCookie['name'] ?? null) : null;
+        }) ?? '_identity';
+
+        return array_values(array_filter($names, static function ($name): bool {
+            return is_string($name) && $name !== '';
+        }));
+    }
+
+    /**
+     * Reads a setting of an application component without creating the component: from the component once it
+     * exists, otherwise from its configuration.
+     *
+     * @param string[] $path the setting's keys in the component's configuration
+     * @param callable(object): ?string $read reads the setting from the component
+     */
+    private static function componentSetting(Application $app, string $id, array $path, callable $read): ?string
+    {
+        if ($app->has($id, true)) {
+            return $read($app->get($id));
+        }
+
+        $value = $app->getComponents()[$id] ?? null;
+        foreach ($path as $key) {
+            $value = is_array($value) ? ($value[$key] ?? null) : null;
+        }
+
+        return is_string($value) ? $value : null;
+    }
+
+    /**
+     * @return int|null the most bytes of a request body to send (0 for none), or null without a limit, as the SDK's
+     *                  `max_request_body_size` option sets it
+     */
+    private static function requestBodyLimit(Options $options): ?int
+    {
+        switch ($options->getMaxRequestBodySize()) {
+            case 'small':
+                return 1000;
+            case 'medium':
+                return 10000;
+            case 'always':
+                return null;
+            default:
+                return 0;
+        }
+    }
+
+    private static function attempt(string $what, callable $step): void
+    {
+        try {
+            $step();
+        } catch (Throwable $exception) {
+            Yii::warning("Unable to $what the Sentry event: " . $exception, __METHOD__);
         }
     }
 }

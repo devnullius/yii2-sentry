@@ -65,7 +65,8 @@ class LogTarget extends Target
      */
     public $breadcrumbLevels = ['error', 'warning', 'info', 'trace'];
     /**
-     * Replace the values written into SQL log lines (strings and numbers) with "?" in breadcrumbs and Sentry Logs.
+     * Replace the values in SQL log lines (strings and numbers) and in database errors with "?" in breadcrumbs and
+     * Sentry Logs. Error events mask database errors with the component's `privacy` setting `maskDatabaseErrors`.
      *
      * @var bool
      */
@@ -452,7 +453,12 @@ class LogTarget extends Target
     private function messageText($body, string $category): string
     {
         if ($body instanceof Throwable) {
-            return get_class($body) . ': ' . $body->getMessage();
+            $message = $body->getMessage();
+            if ($this->maskSqlValues && SqlMasker::isDatabaseError(get_class($body))) {
+                $message = SqlMasker::maskErrorMessage($message);
+            }
+
+            return get_class($body) . ': ' . $message;
         }
 
         $text = is_string($body) ? $body : VarDumper::export($body);

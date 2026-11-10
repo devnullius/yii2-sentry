@@ -4,6 +4,7 @@ declare(strict_types=1);
 namespace devnullius\yii2\sentry;
 
 use Closure;
+use ReflectionClass;
 use Sentry\Breadcrumb;
 use Sentry\ClientBuilder;
 use Sentry\ClientInterface;
@@ -60,6 +61,22 @@ class Component extends \yii\base\Component implements BootstrapInterface
         ModulesIntegration::class,
         RequestIntegration::class,
     ];
+    /**
+     * @var array<string, mixed> Settings for this package's [[Integration]], which decides what Sentry receives
+     * about requests, function arguments and database errors: which secrets and personal data are scrubbed, and
+     * which request bodies are sent. For example:
+     *
+     * ```php
+     * 'privacy' => [
+     *     // Show personal data, like email addresses, even without send_default_pii.
+     *     'scrubPersonalData' => false,
+     *     'secretFields' => array_merge(Integration::SECRET_FIELDS, ['license']),
+     * ],
+     * ```
+     *
+     * See the [[Integration]] properties for all settings.
+     */
+    public $privacy = [];
     /**
      * @var bool Whether to reuse a Sentry client that is already set up, e.g. by `\Sentry\init()` called before Yii
      * boots, instead of creating one from this component's configuration. The SDK options and integrations then
@@ -311,7 +328,8 @@ class Component extends \yii\base\Component implements BootstrapInterface
     /**
      * @return IntegrationInterface[]
      *
-     * @throws InvalidConfigException if an item does not create a Sentry integration
+     * @throws InvalidConfigException if an item does not create a Sentry integration, or [[privacy]] has a setting
+     * the integration doesn't have
      */
     protected function createIntegrations(): array
     {
@@ -328,10 +346,31 @@ class Component extends \yii\base\Component implements BootstrapInterface
                 ));
             }
 
+            if ($integration instanceof Integration) {
+                $this->applyPrivacySettings($integration);
+            }
+
             $integrations[] = $integration;
         }
 
         return $integrations;
+    }
+
+    /**
+     * @throws InvalidConfigException on a setting the integration doesn't have, e.g. a misspelled one
+     */
+    private function applyPrivacySettings(Integration $integration): void
+    {
+        $class = new ReflectionClass($integration);
+
+        foreach ($this->privacy as $name => $value) {
+            $name = (string)$name;
+            if (!$class->hasProperty($name) || !$class->getProperty($name)->isPublic() || $class->getProperty($name)->isStatic()) {
+                throw new InvalidConfigException(sprintf('Unknown Sentry privacy setting "%s".', $name));
+            }
+
+            $integration->$name = $value;
+        }
     }
 
     /**

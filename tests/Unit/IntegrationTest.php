@@ -7,13 +7,13 @@ namespace devnullius\yii2\sentry\tests\Unit;
 use devnullius\yii2\sentry\Integration;
 use devnullius\yii2\sentry\tests\Support\SubIntegration;
 use devnullius\yii2\sentry\tests\Support\TestCase;
+use devnullius\yii2\sentry\tests\Support\UnreadableHeadersRequest;
 use Sentry\State\Scope;
 use Yii;
 use yii\base\Action;
 use yii\log\Logger;
 use yii\web\Application;
 use yii\web\Controller;
-use yii\web\JsonParser;
 
 /**
  * @runTestsInSeparateProcesses
@@ -45,9 +45,9 @@ final class IntegrationTest extends TestCase
             $hub->captureMessage('hello');
         });
 
-        $extra = $this->singleEvent()['extra'] ?? [];
-        $this->assertSame('kept', $extra['from_scope'] ?? null);
-        $this->assertSame(['username' => 'alice'], $extra['decodedParams'] ?? null);
+        $event = $this->singleEvent();
+        $this->assertSame('kept', $event['extra']['from_scope'] ?? null);
+        $this->assertSame(['username' => 'alice'], $event['request']['data'] ?? null);
     }
 
     public function testRequestWithoutAResolvedActionIsStillReported(): void
@@ -96,7 +96,7 @@ final class IntegrationTest extends TestCase
 
         $app->get('sentry')->getHub()->captureMessage('hello');
 
-        $decoded = $this->singleEvent()['extra']['decodedParams'] ?? [];
+        $decoded = $this->singleEvent()['request']['data'] ?? [];
         if ($expectedProfile === null) {
             $this->assertArrayNotHasKey('profile', $decoded, 'Filtering must not add fields to the body.');
         } else {
@@ -131,17 +131,18 @@ final class IntegrationTest extends TestCase
 
     public function testAFailureWhileReadingRequestDataDoesNotLoseTheEvent(): void
     {
-        $app = $this->createWebApp(
-            [],
-            ['REQUEST_METHOD' => 'POST', 'REQUEST_URI' => '/site/post-log', 'CONTENT_TYPE' => 'application/json'],
-            ['request' => ['parsers' => ['application/json' => JsonParser::class]]]
-        );
-        $app->getRequest()->setRawBody('{"invalid json');
+        $app = $this->createWebApp([], $this->formPost(['password' => 'hunter2']), [
+            'request' => ['class' => UnreadableHeadersRequest::class],
+        ]);
+        $app->getRequest()->setRawBody('password=hunter2');
         $this->runningAction($app, 'post-log');
 
         $app->get('sentry')->getHub()->captureMessage('hello');
 
-        $this->assertSame('hello', $this->singleEvent()['message'] ?? null);
+        $event = $this->singleEvent();
+        $this->assertSame('hello', $event['message'] ?? null);
+        // Without a body of its own, the SDK's RequestIntegration would add the raw one.
+        $this->assertSame('[not sent: the request could not be read]', $event['request']['data'] ?? null);
         $warnings = array_filter(Yii::getLogger()->messages, static function (array $message): bool {
             return $message[1] === Logger::LEVEL_WARNING && strpos($message[2], 'devnullius\yii2\sentry') === 0;
         });

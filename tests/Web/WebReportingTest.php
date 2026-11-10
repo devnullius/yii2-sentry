@@ -25,7 +25,7 @@ final class WebReportingTest extends WebServerTestCase
     {
         $response = $this->request('default', 'POST', '/site/post-log', self::FORM, 'username=alice');
 
-        $this->assertSame(['username' => 'alice'], $this->singleEvent($response)['extra']['decodedParams'] ?? null);
+        $this->assertSame(['username' => 'alice'], $this->singleEvent($response)['request']['data'] ?? null);
     }
 
     public function testEachLoggedErrorIsItsOwnEvent(): void
@@ -178,10 +178,10 @@ final class WebReportingTest extends WebServerTestCase
     public function testTheBodyIsLeftOutWhenNoRouteRuleCanBeApplied(): void
     {
         // The request fails before routing, so the piiBodyFields rules for site/post-log can't be matched.
-        $response = $this->request('api_pii', 'POST', '/site/post-log', self::FORM, 'username=alice&password=hunter2');
+        $response = $this->request('api_pii', 'POST', '/site/post-log', self::FORM, 'username=alice&nickname=annie');
 
         $this->assertSame(500, $response['status']);
-        $this->assertStringNotContainsString('hunter2', (string)json_encode($this->singleEvent($response)));
+        $this->assertStringNotContainsString('annie', (string)json_encode($this->singleEvent($response)));
     }
 
     public function testTheSdkDataCollectionPolicyIsHonored(): void
@@ -203,6 +203,49 @@ final class WebReportingTest extends WebServerTestCase
         $response = $this->request('existing_hub_pii', 'GET', '/site/log-error', ['X-Forwarded-For: 198.51.100.23']);
 
         $this->assertSame('198.51.100.23', $this->singleEvent($response)['user']['ip_address'] ?? null);
+    }
+
+    public function testALoginFormSendsNeitherThePasswordNorTheEmail(): void
+    {
+        $response = $this->request('default', 'POST', '/site/post-log', self::FORM, http_build_query([
+            'LoginForm' => ['email' => 'ann@example.com', 'password' => 'hunter2', 'rememberMe' => '1'],
+        ]));
+
+        $event = (string)json_encode($this->singleEvent($response));
+        $this->assertStringNotContainsString('hunter2', $event);
+        $this->assertStringNotContainsString('ann@example.com', $event);
+        $this->assertStringContainsString('rememberMe', $event, 'Other fields are still sent.');
+    }
+
+    public function testWithSendDefaultPiiTheSessionCookieIsStillScrubbed(): void
+    {
+        $login = $this->request('pii_on', 'GET', '/site/login');
+        $this->assertNotNull($login['sessionCookie']);
+        $sessionId = substr((string)$login['sessionCookie'], strlen('PHPSESSID='));
+
+        $response = $this->request('pii_on', 'GET', '/site/log-error', ['Cookie: theme=dark; ' . $login['sessionCookie']]);
+
+        $event = $this->singleEvent($response);
+        $this->assertStringNotContainsString($sessionId, (string)json_encode($event), 'A session ID in Sentry allows session hijacking.');
+        $this->assertSame('dark', $event['request']['cookies']['theme'] ?? null, 'Other cookies are still sent.');
+    }
+
+    public function testAMultipartFormIsScrubbedToo(): void
+    {
+        // PHP reads a multipart body into $_POST itself. Up to 4.1, the SDK then added the fields unfiltered.
+        $boundary = 'test-boundary';
+        $body = '';
+        foreach (['LoginForm[email]' => 'ann@example.com', 'LoginForm[password]' => 'hunter2', 'LoginForm[rememberMe]' => '1'] as $name => $value) {
+            $body .= "--$boundary\r\nContent-Disposition: form-data; name=\"$name\"\r\n\r\n$value\r\n";
+        }
+        $body .= "--$boundary--\r\n";
+
+        $response = $this->request('default', 'POST', '/site/post-log', ["Content-Type: multipart/form-data; boundary=$boundary"], $body);
+
+        $this->assertSame(
+            ['LoginForm' => ['email' => '[Filtered PII]', 'password' => '[Filtered PII]', 'rememberMe' => '1']],
+            $this->singleEvent($response)['request']['data'] ?? null
+        );
     }
 
     public function testProxyHeadersAreFilteredByDefault(): void

@@ -82,9 +82,8 @@ return static function (string $scenario, string $outDir, string $run): array {
         case 'api_pii':
             // API-style app: no error action, and a failure before any action is resolved.
             if ($scenario === 'api_pii') {
-                $integration = new Integration();
-                $integration->piiBodyFields = ['site/post-log' => ['password']];
-                $sentry['integrations'] = $withIntegration($integration);
+                // Neither a secret nor personal data by name: only the route's rule covers it.
+                $sentry['privacy'] = ['piiBodyFields' => ['site/post-log' => ['nickname']]];
             }
             $errorAction = null;
             $events['on beforeRequest'] = static function (): void {
