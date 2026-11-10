@@ -141,7 +141,7 @@ final class IntegrationTest extends TestCase
 
         $app->get('sentry')->getHub()->captureMessage('hello');
 
-        $this->assertSame('hello', $this->singleEvent()['message']['formatted'] ?? null);
+        $this->assertSame('hello', $this->singleEvent()['message'] ?? null);
         $warnings = array_filter(Yii::getLogger()->messages, static function (array $message): bool {
             return $message[1] === Logger::LEVEL_WARNING && strpos($message[2], 'devnullius\yii2\sentry') === 0;
         });

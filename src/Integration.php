@@ -8,9 +8,16 @@ use Sentry\Integration\IntegrationInterface;
 use Sentry\Options;
 use Sentry\SentrySdk;
 use Sentry\State\Scope;
+use Sentry\UserDataBag;
+use Throwable;
 use Yii;
+use yii\helpers\ArrayHelper;
+use yii\web\Request;
 use function in_array;
 
+/**
+ * Adds the current Yii web request to Sentry events, with control over personal data in headers and the body.
+ */
 class Integration implements IntegrationInterface
 {
     /**
@@ -28,9 +35,11 @@ class Integration implements IntegrationInterface
     /**
      * List of headers, that can contain Personal data. Use lower case.
      *
+     * The defaults cover credentials and the visitor's IP address as forwarded by proxies.
+     *
      * @var string[]
      */
-    public $piiHeaders = ['authorization', 'remote_addr'];
+    public $piiHeaders = ['authorization', 'proxy-authorization', 'x-forwarded-for', 'x-real-ip', 'remote_addr'];
     /**
      * List of routes with keys, that must be stripped from request body
      * For example:
@@ -43,7 +52,13 @@ class Integration implements IntegrationInterface
      *     'account/login' => [
      *         'email',
      *         'password',
-     *     ]
+     *     ],
+     *     // Nested fields, e.g. the ones posted by a Yii ActiveForm as LoginForm[password]
+     *     'site/login' => [
+     *         'LoginForm' => [
+     *             'password',
+     *         ],
+     *     ],
      * ]
      * ```
      *
@@ -58,7 +73,9 @@ class Integration implements IntegrationInterface
     public $piiReplaceText = '[Filtered PII]';
 
     /**
-     * @var Options
+     * Options to use instead of the client's ones. Normally left unset.
+     *
+     * @var Options|null
      */
     protected $options;
 
@@ -67,35 +84,59 @@ class Integration implements IntegrationInterface
      */
     public function setupOnce(): void
     {
-        Scope::addGlobalEventProcessor(function (Event $event): Event {
-            $currentHub = SentrySdk::getCurrentHub();
-            $integration = $currentHub->getIntegration(self::class);
-            $client = $currentHub->getClient();
-            $options = $this->options ?? $client->getOptions();
+        // The SDK calls this once per integration class and process, so the processor must not use $this: it looks
+        // up the instance registered on the current client, which carries that client's settings.
+        $integrationClass = static::class;
 
+        Scope::addGlobalEventProcessor(static function (Event $event) use ($integrationClass): Event {
+            $currentHub = SentrySdk::getCurrentHub();
+            $client = $currentHub->getClient();
+
+            if ($client === null) {
+                return $event;
+            }
+
+            $integration = $currentHub->getIntegration($integrationClass);
+
+            // The client bound to the current hub may not have this integration enabled.
             if (!$integration instanceof self) {
                 return $event;
             }
 
-            $this->applyToEvent($event, $options);
-
-            return $event;
+            return $integration->processEvent($event, $integration->options ?? $client->getOptions());
         });
+    }
+
+    /**
+     * Adds the current request to the event.
+     *
+     * This runs while errors are being reported, so it never throws: on failure, the event is kept as it is and the
+     * failure is logged as a warning.
+     */
+    public function processEvent(Event $event, Options $options): Event
+    {
+        try {
+            $this->applyToEvent($event, $options);
+        } catch (Throwable $exception) {
+            Yii::warning('Unable to add the request to the Sentry event: ' . $exception, __METHOD__);
+        }
+
+        return $event;
     }
 
     protected function applyToEvent(Event $event, Options $options): void
     {
-        $request = Yii::$app->getRequest();
+        $request = Yii::$app !== null ? Yii::$app->getRequest() : null;
 
         // Skip if the current request is made via console.
-        if ($request->isConsoleRequest) {
+        if (!$request instanceof Request || $request->getIsConsoleRequest()) {
             return;
         }
 
         $requestMethod = $request->getMethod();
 
         $requestData = [
-            'url' => $request->getUrl(),
+            'url' => $this->getRequestUrl($request),
             'method' => $requestMethod,
             'query_string' => $request->getQueryString(),
         ];
@@ -103,46 +144,45 @@ class Integration implements IntegrationInterface
         // Process headers, cookies, etc. Done the same way as in RequestIntegration, but using Yii's stuff.
         /** @see \Sentry\Integration\RequestIntegration */
         if ($options->shouldSendDefaultPii()) {
-            $headers = $request->getHeaders();
-            if ($headers->has('REMOTE_ADDR')) {
-                $requestData['env']['REMOTE_ADDR'] = $headers->get('REMOTE_ADDR');
+            $remoteIp = $request->getRemoteIP();
+            if ($remoteIp !== null) {
+                $requestData['env']['REMOTE_ADDR'] = $remoteIp;
             }
 
-            $requestData['cookies'] = $request->getCookies();
-            $requestData['headers'] = $headers->toArray();
-
-            $userContext = $event->getUserContext();
-
-            if (null === $userContext->getIpAddress() && $headers->has('REMOTE_ADDR')) {
-                $userContext->setIpAddress($headers->get('REMOTE_ADDR'));
-            }
+            $requestData['cookies'] = $_COOKIE;
+            $requestData['headers'] = $request->getHeaders()->toArray();
         } else {
             $requestData['headers'] = $this->processHeaders($request->getHeaders()->toArray());
         }
 
-        // Process request body
-        if (in_array($requestMethod, $this->httpMethodsWithRequestBody, true)) {
-            $rawBody = $request->getRawBody();
-            if ($rawBody !== '') {
-                $bodyParams = $request->getBodyParams();
-
-                $actionId = Yii::$app->requestedAction->getUniqueId();
-                if (!$options->shouldSendDefaultPii() && isset($this->piiBodyFields[$actionId])) {
-                    $requestData['data'] = 'Not available due to PII. See "bodyParams" in Additional data block.';
-
-                    $this->removeKeysFromArrayRecursively($bodyParams, $this->piiBodyFields[$actionId]);
-                } else {
-                    $requestData['data'] = $rawBody;
-                }
-
-                $event->setExtra([
-                    'decodedParams' => $bodyParams,
-                ]);
-            }
+        try {
+            $this->addRequestBody($event, $request, $options, $requestData);
+        } finally {
+            // Keep the rest of the request data, even if reading the body failed.
+            $event->setRequest($requestData);
         }
 
-        // Set!
-        $event->setRequest($requestData);
+        if ($options->shouldSendDefaultPii()) {
+            // Unlike REMOTE_ADDR, this is the client's IP behind the proxies listed in Request::$trustedHosts.
+            $this->addUserIpAddress($event, $request->getUserIP());
+        }
+    }
+
+    /**
+     * @return string the absolute URL without the query string, which is sent separately
+     */
+    protected function getRequestUrl(Request $request): string
+    {
+        $url = $request->getUrl();
+
+        $queryPosition = strpos($url, '?');
+        if ($queryPosition !== false) {
+            $url = substr($url, 0, $queryPosition);
+        }
+
+        $hostInfo = $request->getHostInfo();
+
+        return $hostInfo !== null ? $hostInfo . $url : $url;
     }
 
     /**
@@ -160,7 +200,7 @@ class Integration implements IntegrationInterface
                 continue;
             }
 
-            // Check fo PII in headers
+            // Check for PII in headers
             if (in_array(strtolower((string)$header), $this->piiHeaders, true)) {
                 $result[$header] = $this->piiReplaceText;
             } else {
@@ -171,16 +211,73 @@ class Integration implements IntegrationInterface
         return $result;
     }
 
+    /**
+     * Replaces the values of the given keys with [[piiReplaceText]]. A string key with an array value describes
+     * nested fields. Keys missing from the body are skipped; the body comes from the client and may have any shape.
+     */
     protected function removeKeysFromArrayRecursively(array &$array, array $keysToRemove): void
     {
         foreach ($keysToRemove as $key => $value) {
             if (is_string($key) && is_array($value)) {
-                $this->removeKeysFromArrayRecursively($array[$key], $value);
-            } else {
-                if (isset($array[$value])) {
-                    $array[$value] = $this->piiReplaceText;
+                if (isset($array[$key]) && is_array($array[$key])) {
+                    $this->removeKeysFromArrayRecursively($array[$key], $value);
                 }
+            } elseif ((is_string($value) || is_int($value)) && isset($array[$value])) {
+                $array[$value] = $this->piiReplaceText;
             }
+        }
+    }
+
+    /**
+     * @param array<string, mixed> $requestData
+     */
+    private function addRequestBody(Event $event, Request $request, Options $options, array &$requestData): void
+    {
+        if (!in_array($request->getMethod(), $this->httpMethodsWithRequestBody, true)) {
+            return;
+        }
+
+        $rawBody = $request->getRawBody();
+        if ($rawBody === '') {
+            return;
+        }
+
+        $bodyParams = $request->getBodyParams();
+        if (!is_array($bodyParams)) {
+            // E.g. a JsonParser configured with asArray = false.
+            $bodyParams = ArrayHelper::toArray($bodyParams);
+        }
+
+        // No action is resolved yet when a request fails before routing, e.g. in bootstrap or "beforeRequest".
+        $action = Yii::$app->requestedAction;
+        $actionId = $action !== null ? $action->getUniqueId() : null;
+
+        if (!$options->shouldSendDefaultPii() && $actionId !== null && isset($this->piiBodyFields[$actionId])) {
+            $requestData['data'] = 'Not available due to PII. See "decodedParams" in Additional data block.';
+
+            $this->removeKeysFromArrayRecursively($bodyParams, $this->piiBodyFields[$actionId]);
+        } else {
+            $requestData['data'] = $rawBody;
+        }
+
+        // Merge: the scope's extras, e.g. the log context added by LogTarget, are already on the event.
+        $event->setExtra(array_merge($event->getExtra(), [
+            'decodedParams' => $bodyParams,
+        ]));
+    }
+
+    private function addUserIpAddress(Event $event, ?string $ipAddress): void
+    {
+        if ($ipAddress === null || $ipAddress === '') {
+            return;
+        }
+
+        $user = $event->getUser();
+
+        if ($user === null) {
+            $event->setUser(UserDataBag::createFromUserIpAddress($ipAddress));
+        } elseif ($user->getIpAddress() === null) {
+            $user->setIpAddress($ipAddress);
         }
     }
 }
