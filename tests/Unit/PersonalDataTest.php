@@ -377,6 +377,15 @@ final class PersonalDataTest extends TestCase
                 'Opening DB connection: pgsql:host=db;dbname=app;password=db-secret',
                 'Opening DB connection: pgsql:host=db;dbname=app;password=[Filtered PII]',
             ],
+            // yii2-queue's LogBehavior: the exception and its stack trace, here of a job a worker ran in a process of
+            // its own, with everything that process printed.
+            'failed queue job' => [
+                'yii\queue\Queue',
+                "[42] app\\jobs\\ChargeJob (attempt: 1, PID: 77) is finished with error: ProcessFailedException: The command \"'php' 'yii' 'queue/exec' '42'\" failed.\n\n"
+                    . "Exit Code: 5(Unknown error)\n\nOutput:\n================\nCharging card 4111111111111111\n in /app/vendor/yiisoft/yii2-queue/src/cli/Command.php:195\n"
+                    . "Stack trace:\n#0 /app/vendor/yiisoft/yii2-queue/src/cli/Queue.php(146): yii\\queue\\cli\\Command->handleMessage(42, 'O:19:\"app\\\\jobs\\\\Ch...', 300, 1)",
+                "[42] app\\jobs\\ChargeJob (attempt: 1, PID: 77) is finished with error: ProcessFailedException: The command \"'php' 'yii' 'queue/exec' '42'\" failed.",
+            ],
         ];
     }
 
@@ -433,8 +442,10 @@ final class PersonalDataTest extends TestCase
      */
     private function breadcrumbsAfter(array $lines, array $sentry = [], array $target = []): array
     {
-        // Outgoing calls are breadcrumbs of their own while HTTP client tracing is on: test Yii's line instead.
+        // Outgoing calls are breadcrumbs of their own while HTTP client tracing is on, and so are queued and failed jobs:
+        // test the lines Yii and yii2-queue log instead.
         $sentry['tracing'] = array_merge(['httpClient' => false], $sentry['tracing'] ?? []);
+        $sentry['queue'] = array_merge(['breadcrumbs' => false, 'errors' => false], $sentry['queue'] ?? []);
         $this->createWebApp($sentry, [], [
             'log' => ['targets' => ['sentry' => array_merge(['class' => LogTarget::class], $target)]],
         ])->getLog();

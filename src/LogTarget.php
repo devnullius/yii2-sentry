@@ -40,6 +40,11 @@ class LogTarget extends Target
     ];
 
     /**
+     * The category yii2-queue's LogBehavior logs under.
+     */
+    private const QUEUE_CATEGORY = 'yii\queue\Queue';
+
+    /**
      * The Sentry component to pass logs to, or its application component ID.
      *
      * @var Component|string
@@ -222,22 +227,37 @@ class LogTarget extends Target
 
         foreach ($this->messages as $message) {
             $level = $message[1];
+            $category = (string)$message[2];
 
-            if (($eventLevels & $level) !== 0) {
+            if (($eventLevels & $level) !== 0 && !$this->isReportedElsewhere($category, $level)) {
                 $this->captureEvent($hub, $message);
             }
 
-            if (($breadcrumbLevels & $level) !== 0 && !$this->isCoveredElsewhere((string)$message[2])) {
+            if (($breadcrumbLevels & $level) !== 0 && !$this->isCoveredElsewhere($category, $level)) {
                 $hub->addBreadcrumb($this->createBreadcrumb($message));
             }
         }
     }
 
     /**
+     * Whether the component reports what an event-level message is about itself.
+     */
+    private function isReportedElsewhere(string $category, int $level): bool
+    {
+        // yii2-queue's LogBehavior logs the exception of a failed job as text; the component reports the exception.
+        return $category === self::QUEUE_CATEGORY && $level === Logger::LEVEL_ERROR && $this->component->reportsQueueErrors();
+    }
+
+    /**
      * Whether the component adds breadcrumbs of its own for what the messages of this category are about.
      */
-    private function isCoveredElsewhere(string $category): bool
+    private function isCoveredElsewhere(string $category, int $level): bool
     {
+        if ($category === self::QUEUE_CATEGORY) {
+            // Queuing a job is a breadcrumb, and a failed job an event of its own.
+            return $level === Logger::LEVEL_ERROR ? $this->component->reportsQueueErrors() : $this->component->addsQueueBreadcrumbs();
+        }
+
         // Every outgoing HTTP call gets a breadcrumb with its status code.
         return strpos($category, 'yii\\httpclient\\') === 0 && $this->component->tracesHttpClient();
     }
@@ -267,7 +287,12 @@ class LogTarget extends Target
             return;
         }
 
-        $event->setMessage(is_string($body) ? $body : VarDumper::export($body));
+        $text = is_string($body) ? $body : VarDumper::export($body);
+        if ($category === self::QUEUE_CATEGORY) {
+            // LogBehavior's line about a failed job, when the component doesn't report the job itself.
+            $text = FailedJobText::withoutJobData($text);
+        }
+        $event->setMessage($text);
 
         $traces = $message[4] ?? [];
         if ($this->stackTraces && is_array($traces) && $traces !== []) {
@@ -385,8 +410,8 @@ class LogTarget extends Target
     private function exportAggregated(HubInterface $hub): void
     {
         $eventLevels = $this->getLevels();
-        $messages = array_values(array_filter($this->messages, static function (array $message) use ($eventLevels): bool {
-            return ($eventLevels & $message[1]) !== 0;
+        $messages = array_values(array_filter($this->messages, function (array $message) use ($eventLevels): bool {
+            return ($eventLevels & $message[1]) !== 0 && !$this->isReportedElsewhere((string)$message[2], (int)$message[1]);
         }));
         if ($messages === []) {
             return;
@@ -414,12 +439,12 @@ class LogTarget extends Target
                 continue;
             }
 
-            $logs[] = $this->formatMessage($message);
+            $logs[] = $this->formatMessage(self::withoutJobData($message));
         }
 
         // Configure scope and capture error
         $hub->withScope(function (Scope $scope) use ($hub, $primaryMessage, $logs) {
-            [$body, $level, $category, $timestamp] = $primaryMessage;
+            [$body, $level, $category, $timestamp] = self::withoutJobData($primaryMessage);
 
             if (!empty($category)) {
                 $scope->setTag('category', $category);
@@ -454,6 +479,20 @@ class LogTarget extends Target
                 $hub->captureMessage($text, $this->getSeverityLevel($level));
             }
         });
+    }
+
+    /**
+     * @param array<int, mixed> $message
+     *
+     * @return array<int, mixed> the message; LogBehavior's line about a failed job without the job's data it may hold
+     */
+    private static function withoutJobData(array $message): array
+    {
+        if (($message[2] ?? null) === self::QUEUE_CATEGORY && is_string($message[0] ?? null)) {
+            $message[0] = FailedJobText::withoutJobData($message[0]);
+        }
+
+        return $message;
     }
 
     /**

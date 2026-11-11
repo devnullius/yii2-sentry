@@ -2,5 +2,7 @@ parameters:
     level: 5
     paths:
         - src
+        # PHPStan analyses a trait only where a class uses it.
+        - tests/Fixtures/Jobs/TracedJob.php
     bootstrapFiles:
         - tests/phpstan-bootstrap.php

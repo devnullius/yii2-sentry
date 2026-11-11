@@ -434,37 +434,4 @@ final class TracingTest extends TestCase
         return $this->createWebApp($sentry, array_merge(['REQUEST_TIME_FLOAT' => self::REQUEST_START], $server), $components);
     }
 
-    /**
-     * Ends the request the way Yii does once the response has been sent.
-     *
-     * @return array<string, mixed> the request's transaction
-     */
-    private function finishRequest(Application $app, int $statusCode): array
-    {
-        $response = $app->getResponse();
-        $response->setStatusCode($statusCode);
-        $response->trigger(Response::EVENT_AFTER_SEND);
-
-        $transactions = $this->transactions();
-        $this->assertCount(1, $transactions, 'Expected exactly one transaction to be sent to Sentry.');
-
-        return $transactions[0];
-    }
-
-    /**
-     * @param array<string, mixed> $transaction
-     *
-     * @return list<array<string, mixed>> the transaction's spans with the given operation, in order
-     */
-    private function spans(array $transaction, string $op): array
-    {
-        $spans = array_values(array_filter($transaction['spans'] ?? [], static function (array $span) use ($op): bool {
-            return ($span['op'] ?? null) === $op;
-        }));
-        usort($spans, static function (array $a, array $b): int {
-            return $a['start_timestamp'] <=> $b['start_timestamp'];
-        });
-
-        return $spans;
-    }
 }

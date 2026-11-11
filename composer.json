@@ -50,10 +50,12 @@
     "require-dev": {
         "phpstan/phpstan": "^2.1",
         "phpunit/phpunit": "^9.6.38",
-        "yiisoft/yii2-httpclient": "^2.0.15"
+        "yiisoft/yii2-httpclient": "^2.0.15",
+        "yiisoft/yii2-queue": "^2.3.8"
     },
     "suggest": {
-        "yiisoft/yii2-httpclient": "Records outgoing yii2-httpclient requests when performance tracing is enabled"
+        "yiisoft/yii2-httpclient": "Records outgoing yii2-httpclient requests when performance tracing is enabled",
+        "yiisoft/yii2-queue": "Reports failed queue jobs with their details, and traces each job"
     },
     "autoload": {
         "psr-4": {

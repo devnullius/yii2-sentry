@@ -10,6 +10,7 @@ use devnullius\yii2\sentry\tests\Fixtures\Console\HelloController;
 use Yii;
 use yii\console\Application as ConsoleApplication;
 use yii\web\Application;
+use yii\web\Response;
 
 /**
  * Base for in-process tests. Builds a Yii web application (in CLI, with the request marked as a web request) whose
@@ -119,6 +120,40 @@ abstract class TestCase extends \PHPUnit\Framework\TestCase
     protected function transactions(): array
     {
         return RecordingTransport::onlyType($this->transport->payloads, 'transaction');
+    }
+
+    /**
+     * Ends the request the way Yii does once the response has been sent.
+     *
+     * @return array<string, mixed> the request's transaction
+     */
+    protected function finishRequest(Application $app, int $statusCode): array
+    {
+        $response = $app->getResponse();
+        $response->setStatusCode($statusCode);
+        $response->trigger(Response::EVENT_AFTER_SEND);
+
+        $transactions = $this->transactions();
+        $this->assertCount(1, $transactions, 'Expected exactly one transaction to be sent to Sentry.');
+
+        return $transactions[0];
+    }
+
+    /**
+     * @param array<string, mixed> $transaction
+     *
+     * @return list<array<string, mixed>> the transaction's spans with the given operation, in order
+     */
+    protected function spans(array $transaction, string $op): array
+    {
+        $spans = array_values(array_filter($transaction['spans'] ?? [], static function (array $span) use ($op): bool {
+            return ($span['op'] ?? null) === $op;
+        }));
+        usort($spans, static function (array $a, array $b): int {
+            return $a['start_timestamp'] <=> $b['start_timestamp'];
+        });
+
+        return $spans;
     }
 
     /**

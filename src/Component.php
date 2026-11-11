@@ -31,6 +31,7 @@ use yii\base\InlineAction;
 use yii\base\InvalidConfigException;
 use yii\helpers\Html;
 use yii\httpclient\Client;
+use yii\queue\Queue;
 use yii\web\Response;
 use yii\web\User;
 use function Sentry\getBaggage;
@@ -82,17 +83,43 @@ class Component extends \yii\base\Component implements BootstrapInterface
      *
      * - `requests`: a transaction for every web request, named by its route, with its HTTP status, timed from when
      *   PHP received the request.
-     * - `commands`: a transaction for every console command.
+     * - `commands`: a transaction for every console command, except yii2-queue workers (`queue/listen`,
+     *   `queue/run`): they run for as long as they wait for jobs, so their jobs are traced one by one instead.
      * - `actions`: a span for every controller action.
      * - `views`: a span for every view rendered.
      * - `httpClient`: a span and a breadcrumb for every call made with yii2-httpclient, and the trace headers the
      *   called service needs to continue the trace (to the hosts in the SDK's `trace_propagation_targets`, or all).
      *   Breadcrumbs and trace headers are added without tracing too.
      * - `database`: a span for every SQL query, with values masked, from Yii's DB profiling (`enableProfiling`).
+     * - `queue`: a transaction for every yii2-queue job a worker runs, named by the job's class (a span when the job
+     *   runs inside a traced request or command, as with the sync queue), and a span for every job queued.
      * - `continueTraces`: continue the trace of the caller (the `sentry-trace` and `baggage` headers), so that this
-     *   request's errors and spans show in it; also without tracing.
+     *   request's errors and spans show in it; also without tracing. The same for queue jobs that carry the trace of
+     *   the code that queued them, see [[TraceableJobInterface]].
      */
     public $tracing = [];
+    /**
+     * @var array<string, bool> What is reported about yii2-queue jobs, when yii2-queue is installed. All parts are on
+     * by default:
+     *
+     * - `errors`: a job that fails becomes an error event: its exception, with the job's class, ID, attempt and queue,
+     *   and whether yii2-queue will retry it (the `job.retry` tag). The line yii2-queue's `LogBehavior` logs about
+     *   the same failure doesn't become a second event. A worker also reports a job that ended the process running
+     *   it, or that ran past its time to reserve (without what that process printed).
+     * - `retries`: also report a failed attempt that yii2-queue will retry. Turn it off to report a job only once it
+     *   has failed for good.
+     * - `jobData`: add the job's public properties to its events, scrubbed like request bodies (see [[privacy]]):
+     *   secrets are always hidden, personal data while the SDK's `send_default_pii` is off. Never when the SDK's
+     *   `data_collection` option is set with `queues` off.
+     * - `breadcrumbs`: a breadcrumb for every job queued, in place of the lines `LogBehavior` logs.
+     *
+     * A job a worker runs also has a scope of its own: its events don't carry what the job before it did. The log
+     * messages a job writes are sent when it ends, with its details. A job, as yii2-queue stores it, is hidden from the
+     * arguments in stack traces: where yii2-queue's own functions take it, and where it is passed on from there. What
+     * LogBehavior logs about a failed job is sent without the job's data it may hold: what the job's process printed,
+     * or a dump of a job that couldn't be read.
+     */
+    public $queue = [];
     /**
      * @var bool Whether to reuse a Sentry client that is already set up, e.g. by `\Sentry\init()` called before Yii
      * boots, instead of creating one from this component's configuration. The SDK options and integrations then
@@ -141,6 +168,10 @@ class Component extends \yii\base\Component implements BootstrapInterface
      */
     private $tracingSettings = Tracer::DEFAULTS;
     /**
+     * @var array<string, bool> [[queue]], with the defaults
+     */
+    private $queueSettings = QueueListener::DEFAULTS;
+    /**
      * @var Integration|null this package's integration, as this component configured it
      */
     private $privacyIntegration;
@@ -153,6 +184,10 @@ class Component extends \yii\base\Component implements BootstrapInterface
      * @var Tracer|null the tracer of the application bootstrapped last
      */
     private static $tracer;
+    /**
+     * @var QueueListener|null the queue listener of the application bootstrapped last, when yii2-queue is installed
+     */
+    private static $queueListener;
     /**
      * @var ClientInterface|null the last client a component created: it is not "existing" for the next component
      */
@@ -170,7 +205,8 @@ class Component extends \yii\base\Component implements BootstrapInterface
     {
         parent::init();
 
-        $this->tracingSettings = $this->validTracingSettings();
+        $this->tracingSettings = self::validSettings('tracing', $this->tracing, Tracer::DEFAULTS);
+        $this->queueSettings = self::validSettings('queue', $this->queue, QueueListener::DEFAULTS);
 
         $currentHub = SentrySdk::getCurrentHub();
         $existingClient = $currentHub->getClient();
@@ -236,22 +272,31 @@ class Component extends \yii\base\Component implements BootstrapInterface
             // The previous application's request or command, if it never ended.
             self::$tracer->end();
         }
-        self::$tracer = new Tracer(
-            $this->hub,
-            $this->tracingSettings,
-            function (string $class, string $name, callable $handler): void {
-                $this->listen($class, $name, $handler);
-            },
-            function (): ?Scrubber {
-                return $this->privacyScrubber();
-            },
-            $this->rootPath()
-        );
+        $listen = function (string $class, string $name, callable $handler): void {
+            $this->listen($class, $name, $handler);
+        };
+        $scrubber = function (): ?Scrubber {
+            return $this->privacyScrubber();
+        };
+        self::$tracer = new Tracer($this->hub, $this->tracingSettings, $listen, $scrubber, $this->rootPath());
         try {
             self::$tracer->start($app);
         } catch (Throwable $exception) {
             // E.g. request headers that can't be read: the application must still start.
             Yii::warning('Unable to start Sentry tracing: ' . $exception, __METHOD__);
+        }
+
+        self::$queueListener = null;
+        if (class_exists(Queue::class)) {
+            self::$queueListener = new QueueListener(
+                $this->hub,
+                $this->queueSettings,
+                $this->tracingSettings['continueTraces'],
+                self::$tracer,
+                $listen,
+                $scrubber
+            );
+            self::$queueListener->start();
         }
 
         $this->listen(Controller::class, Controller::EVENT_BEFORE_ACTION, function (ActionEvent $event) use ($app): void {
@@ -318,6 +363,27 @@ class Component extends \yii\base\Component implements BootstrapInterface
         return $this->tracingSettings['httpClient'] && class_exists(Client::class);
     }
 
+    /**
+     * Whether failed yii2-queue jobs are reported here, so that the line yii2-queue's LogBehavior logs about them
+     * isn't needed.
+     *
+     * @internal used by [[LogTarget]]
+     */
+    public function reportsQueueErrors(): bool
+    {
+        return $this->queueSettings['errors'] && class_exists(Queue::class);
+    }
+
+    /**
+     * Whether queuing a job is a breadcrumb, so that the lines yii2-queue's LogBehavior logs aren't needed.
+     *
+     * @internal used by [[LogTarget]]
+     */
+    public function addsQueueBreadcrumbs(): bool
+    {
+        return $this->queueSettings['breadcrumbs'] && class_exists(Queue::class);
+    }
+
     public function getHub(): HubInterface
     {
         return $this->hub;
@@ -368,19 +434,22 @@ class Component extends \yii\base\Component implements BootstrapInterface
     }
 
     /**
-     * @return array<string, bool>
+     * @param array<string, mixed> $settings
+     * @param array<string, bool> $defaults
+     *
+     * @return array<string, bool> the settings, with the defaults for the ones not given
      *
      * @throws InvalidConfigException on a setting that doesn't exist, e.g. a misspelled one
      */
-    private function validTracingSettings(): array
+    private static function validSettings(string $kind, array $settings, array $defaults): array
     {
-        foreach (array_keys($this->tracing) as $name) {
-            if (!array_key_exists($name, Tracer::DEFAULTS)) {
-                throw new InvalidConfigException(sprintf('Unknown Sentry tracing setting "%s".', $name));
+        foreach (array_keys($settings) as $name) {
+            if (!array_key_exists($name, $defaults)) {
+                throw new InvalidConfigException(sprintf('Unknown Sentry %s setting "%s".', $kind, $name));
             }
         }
 
-        return array_map('boolval', array_merge(Tracer::DEFAULTS, $this->tracing));
+        return array_map('boolval', array_merge($defaults, $settings));
     }
 
     private function privacyScrubber(): ?Scrubber
@@ -506,6 +575,10 @@ class Component extends \yii\base\Component implements BootstrapInterface
                 }
             }
 
+            if (self::$queueListener !== null) {
+                $event = self::$queueListener->processEvent($event);
+            }
+
             if ($type === 'event' && self::$tracer !== null) {
                 // Calls that failed before the event: the breadcrumbs were taken from the scope already.
                 $failedCalls = self::$tracer->reportFailedHttpCalls();
@@ -542,6 +615,16 @@ class Component extends \yii\base\Component implements BootstrapInterface
         if ($traced !== null) {
             if ($event->getTransaction() === null) {
                 $event->setTransaction($traced->getName());
+            }
+
+            return;
+        }
+
+        // An error while a queue job runs, e.g. in a worker, which runs one route for all its jobs.
+        $job = self::$queueListener !== null ? self::$queueListener->currentJobName() : null;
+        if ($job !== null) {
+            if ($event->getTransaction() === null) {
+                $event->setTransaction($job);
             }
 
             return;

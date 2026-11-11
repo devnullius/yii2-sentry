@@ -123,7 +123,8 @@ class Integration implements IntegrationInterface
      * @var bool Scrub the log lines Yii itself writes, which become breadcrumbs and Sentry Logs: outgoing HTTP calls
      * keep only their method and URL (Yii logs every header and the body); logins and logouts lose the user ID and
      * IP address, and emails their recipients, while personal data is hidden; a password in the DSN of a database
-     * connection is always scrubbed. Your application's own log lines are sent as they are written.
+     * connection is always scrubbed; yii2-queue's line about a failed job keeps only its first line, without the
+     * stack trace or what the job's process printed. Your application's own log lines are sent as they are written.
      */
     public $scrubYiiLogs = true;
     /**
@@ -514,6 +515,12 @@ class Integration implements IntegrationInterface
         if (strpos($category, 'yii\\httpclient\\') === 0) {
             // The method and URL; then every header, and the body.
             return $this->createScrubber($options)->scrubUrl(explode("\n", $text, 2)[0]);
+        }
+
+        if ($category === 'yii\\queue\\Queue') {
+            // yii2-queue's LogBehavior: the job and the exception it failed with; then the stack trace, with
+            // arguments, and the job's data the exception may hold.
+            return explode("\n", FailedJobText::withoutJobData($text), 2)[0];
         }
 
         if ($category === 'yii\\db\\Connection::open' && $this->scrubSecrets) {

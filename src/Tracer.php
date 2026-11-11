@@ -27,6 +27,7 @@ use yii\httpclient\RequestEvent;
 use yii\httpclient\Response as HttpClientResponse;
 use yii\log\Logger;
 use yii\log\Target;
+use yii\queue\Queue;
 use yii\web\Application as WebApplication;
 use yii\web\Response;
 use function Sentry\continueTrace;
@@ -35,7 +36,8 @@ use function Sentry\getTraceparent;
 
 /**
  * Traces one web request or console command: a transaction, with spans for bootstrap, actions, views, outgoing HTTP
- * calls and SQL queries. Also continues the trace of the caller, and passes the trace on to the services called.
+ * calls, SQL queries and queue jobs. A queue job run by a worker is a transaction of its own. Also continues the trace
+ * of the caller, and passes the trace on to the services called.
  *
  * @internal
  */
@@ -51,6 +53,7 @@ final class Tracer
         'views' => true,
         'httpClient' => true,
         'database' => true,
+        'queue' => true,
         'continueTraces' => true,
     ];
 
@@ -85,6 +88,14 @@ final class Tracer
      */
     private $transaction;
     /**
+     * @var object|null the queue job the transaction traces, when it is the job's own
+     */
+    private $job;
+    /**
+     * @var Span|null the hub's span when the job's own transaction started, given back when it finishes
+     */
+    private $spanBeforeJob;
+    /**
      * @var bool whether the transaction has its final name
      */
     private $named = false;
@@ -117,6 +128,10 @@ final class Tracer
      * @var list<array<int, mixed>> SQL profiling markers handed over by the log
      */
     private $profilingMarkers = [];
+    /**
+     * @var bool
+     */
+    private $shutdownRegistered = false;
 
     /**
      * @param array<string, bool> $settings
@@ -148,8 +163,7 @@ final class Tracer
             });
         }
 
-        $client = $this->hub->getClient();
-        if ($client === null || !$client->getOptions()->isTracingEnabled()) {
+        if (!$this->tracingEnabled()) {
             return;
         }
 
@@ -178,7 +192,12 @@ final class Tracer
             $this->listen(ConsoleApplication::class, Application::EVENT_AFTER_REQUEST, function () use ($app): void {
                 $this->finish(null, (int)$app->getResponse()->exitStatus !== 0);
             });
-        } else {
+        }
+
+        // Queue jobs can be traced even when the request or command isn't, e.g. in a worker, which is not traced as
+        // a command: the spans of their actions, views and queries are then needed too.
+        $tracesJobs = $this->settings['queue'] && class_exists(Queue::class);
+        if ($this->transaction === null && !$tracesJobs) {
             return;
         }
 
@@ -187,19 +206,19 @@ final class Tracer
         });
 
         $transaction = $this->transaction;
-        if ($transaction === null || !$this->traces('spans')) {
+        if ($transaction !== null && $this->traces('spans')) {
+            $this->bootstrapSpan = $transaction->startChild(
+                SpanContext::make()
+                    ->setOp('app.bootstrap')
+                    ->setOrigin('auto.yii2')
+                    ->setStartTimestamp($transaction->getStartTimestamp())
+            );
+            $this->listen(Application::class, Application::EVENT_BEFORE_REQUEST, function (): void {
+                $this->finishBootstrap();
+            });
+        } elseif (!$tracesJobs) {
             return;
         }
-
-        $this->bootstrapSpan = $transaction->startChild(
-            SpanContext::make()
-                ->setOp('app.bootstrap')
-                ->setOrigin('auto.yii2')
-                ->setStartTimestamp($transaction->getStartTimestamp())
-        );
-        $this->listen(Application::class, Application::EVENT_BEFORE_REQUEST, function (): void {
-            $this->finishBootstrap();
-        });
 
         if ($this->settings['actions']) {
             $this->listen(Controller::class, Controller::EVENT_AFTER_ACTION, function (ActionEvent $event): void {
@@ -268,6 +287,13 @@ final class Tracer
      */
     public function end(): void
     {
+        if ($this->job !== null) {
+            // The job never returned, e.g. it called exit().
+            $this->finish(null, true);
+
+            return;
+        }
+
         $app = Yii::$app;
         $error = error_get_last();
         $fatal = $error !== null && in_array($error['type'], [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR], true);
@@ -283,6 +309,110 @@ final class Tracer
 
         $this->transaction = $this->hub->startTransaction($context);
         $this->hub->setSpan($this->transaction);
+        $this->registerShutdown();
+    }
+
+    /**
+     * Stops tracing the console command: a queue worker runs for as long as it waits for jobs, so its jobs are traced
+     * one by one instead. What was recorded for the command is dropped.
+     */
+    public function stopTracingCommand(): void
+    {
+        if ($this->transaction === null || $this->job !== null || $this->transaction->getOp() !== 'console.command') {
+            return;
+        }
+
+        $this->reset();
+        $this->hub->setSpan(null);
+    }
+
+    /**
+     * Starts tracing a queue job: as a span of the request or command it runs in, e.g. with the sync queue, or as a
+     * transaction of its own.
+     *
+     * @param object $job what the job's tracing is finished with
+     * @param array<string, mixed> $data
+     * @param TransactionContext|null $continued the trace of the code that queued the job, if the job carries it
+     */
+    public function startJob(object $job, string $name, array $data, ?TransactionContext $continued): void
+    {
+        if (!$this->settings['queue'] || !$this->tracingEnabled()) {
+            return;
+        }
+
+        if ($this->transaction !== null && !$this->finished) {
+            $this->openSpan($job, 'queue.process', $name, 'auto.queue.yii2', $data);
+
+            return;
+        }
+
+        $context = ($continued ?? TransactionContext::make())
+            ->setOp('queue.process')
+            ->setOrigin('auto.queue.yii2')
+            ->setData($data)
+            ->setStartTimestamp(microtime(true));
+        $context->setName($name);
+        $context->setSource(TransactionSource::task());
+
+        $spanBefore = $this->hub->getSpan();
+        $this->reset();
+        $this->job = $job;
+        $this->spanBeforeJob = $spanBefore;
+        $this->named = true;
+        $this->transaction = $this->hub->startTransaction($context);
+        $this->hub->setSpan($this->transaction);
+        $this->registerShutdown();
+    }
+
+    /**
+     * @param object $job as passed to [[startJob()]]
+     */
+    public function finishJob(object $job, bool $failed): void
+    {
+        if ($this->job !== $job) {
+            $this->closeSpan($job, $failed ? SpanStatus::internalError() : SpanStatus::ok());
+
+            return;
+        }
+
+        $spanBefore = $this->spanBeforeJob;
+        try {
+            $this->finish(null, $failed);
+        } finally {
+            $this->reset();
+            // E.g. the request running the job: what follows belongs to it again.
+            $this->hub->setSpan($spanBefore);
+        }
+    }
+
+    /**
+     * Opens the span of a queue job being queued.
+     *
+     * @param object $push what the span is closed with
+     * @param array<string, mixed> $data
+     */
+    public function startPush(object $push, string $name, array $data): void
+    {
+        if ($this->settings['queue']) {
+            $this->openSpan($push, 'queue.publish', $name, 'auto.queue.yii2', $data);
+        }
+    }
+
+    /**
+     * @param object $push as passed to [[startPush()]]
+     * @param array<string, mixed> $data
+     */
+    public function finishPush(object $push, array $data): void
+    {
+        $this->closeSpan($push, SpanStatus::ok(), $data);
+    }
+
+    private function registerShutdown(): void
+    {
+        if ($this->shutdownRegistered) {
+            return;
+        }
+        $this->shutdownRegistered = true;
 
         register_shutdown_function(function (): void {
             try {
@@ -291,6 +421,23 @@ final class Tracer
                 Yii::warning('Unable to finish the Sentry transaction: ' . $exception, self::class);
             }
         });
+    }
+
+    /**
+     * Forgets the transaction and what was recorded for it.
+     */
+    private function reset(): void
+    {
+        $this->transaction = null;
+        $this->job = null;
+        $this->spanBeforeJob = null;
+        $this->named = false;
+        $this->finished = false;
+        $this->failedWorkClosed = false;
+        $this->bootstrapSpan = null;
+        $this->open = [];
+        $this->workSpans = [];
+        $this->profilingMarkers = [];
     }
 
     /**
@@ -323,15 +470,24 @@ final class Tracer
 
     /**
      * @param object|string $subject what the span traces, to close it with
+     * @param array<string, mixed> $data
      */
-    private function openSpan($subject, string $op, string $description, string $origin): void
+    private function openSpan($subject, string $op, string $description, string $origin, array $data = []): void
     {
+        // Only while a transaction that is sent is running.
+        if ($this->finished || !$this->traces('spans')) {
+            return;
+        }
         $parent = $this->hub->getSpan() ?? $this->transaction;
         if ($parent === null) {
             return;
         }
 
-        $span = $parent->startChild(SpanContext::make()->setOp($op)->setDescription($description)->setOrigin($origin));
+        $context = SpanContext::make()->setOp($op)->setDescription($description)->setOrigin($origin);
+        if ($data !== []) {
+            $context->setData($data);
+        }
+        $span = $parent->startChild($context);
         $this->open[] = [$subject, $span];
         $this->workSpans[] = $span;
         $this->hub->setSpan($span);
@@ -339,8 +495,9 @@ final class Tracer
 
     /**
      * @param object|string $subject
+     * @param array<string, mixed> $data added to the span's data
      */
-    private function closeSpan($subject, SpanStatus $status): void
+    private function closeSpan($subject, SpanStatus $status, array $data = []): void
     {
         for ($index = count($this->open) - 1; $index >= 0; $index--) {
             if ($this->open[$index][0] !== $subject) {
@@ -356,6 +513,9 @@ final class Tracer
 
             $span = array_pop($this->open)[1];
             $span->setStatus($status);
+            if ($data !== []) {
+                $span->setData(array_merge($span->getData(), $data));
+            }
             $span->finish();
             $this->hub->setSpan($this->open !== [] ? $this->open[count($this->open) - 1][1] : $this->transaction);
 
@@ -388,7 +548,7 @@ final class Tracer
     private function beforeHttpCall(HttpClientRequest $request): void
     {
         $method = strtoupper((string)$request->getMethod());
-        [$url, $query] = self::splitUrl((string)$request->getFullUrl());
+        [$url] = self::splitUrl((string)$request->getFullUrl());
 
         $span = null;
         $parent = $this->hub->getSpan();
@@ -500,7 +660,7 @@ final class Tracer
      */
     private function receiveProfilingMarkers(array $messages): void
     {
-        if ($this->finished) {
+        if ($this->finished || !$this->traces('database')) {
             return;
         }
 
@@ -517,6 +677,11 @@ final class Tracer
      */
     private function addQuerySpans(): void
     {
+        $transaction = $this->transaction;
+        if ($transaction === null) {
+            return;
+        }
+
         // The markers logged since the log was last flushed have not reached any log target yet.
         $markers = array_merge(
             $this->profilingMarkers,
@@ -531,7 +696,11 @@ final class Tracer
             if ($level === Logger::LEVEL_PROFILE_BEGIN) {
                 $started[$key][] = (float)$timestamp;
             } elseif ($level === Logger::LEVEL_PROFILE_END && !empty($started[$key])) {
-                $this->addQuerySpan((string)$token, array_pop($started[$key]), (float)$timestamp);
+                $start = array_pop($started[$key]);
+                // Not a query from before the transaction, e.g. of the job a worker ran before.
+                if ($start >= $transaction->getStartTimestamp()) {
+                    $this->addQuerySpan((string)$token, $start, (float)$timestamp);
+                }
             }
         }
     }
@@ -582,6 +751,13 @@ final class Tracer
     private function listen(string $class, string $name, callable $handler): void
     {
         ($this->listen)($class, $name, $handler);
+    }
+
+    private function tracingEnabled(): bool
+    {
+        $client = $this->hub->getClient();
+
+        return $client !== null && $client->getOptions()->isTracingEnabled();
     }
 
     private static function continueIncomingTrace(Application $app): ?TransactionContext
