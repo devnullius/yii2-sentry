@@ -16,6 +16,28 @@ use Yii;
  */
 final class LogTargetTest extends TestCase
 {
+    /**
+     * What yii2-queue's LogBehavior logs when a worker ran a job in a process of its own and that process failed: the
+     * exception holds everything the process printed (here, to its output and to its error output).
+     */
+    private const FAILED_JOB_PROCESS_LINE = "[1] app\\jobs\\ChargeJob (attempt: 1, PID: 77) is finished with error: "
+        . "Symfony\\Component\\Process\\Exception\\ProcessFailedException: The command \"'/usr/bin/php' '/app/yii' "
+        . "'queue/exec' '1' '300' '1' '77' '--color='\" failed.\n\nExit Code: 5(Unknown error)\n\nWorking directory: /app"
+        . "\n\nOutput:\n================\nCharging card 4111111111111111\n\n\nError Output:\n================\n"
+        . "Token sk_live_123 rejected\n in /app/vendor/yiisoft/yii2-queue/src/cli/Command.php:195\nStack trace:\n"
+        . "#0 /app/vendor/yiisoft/yii2-queue/src/cli/Queue.php(146): yii\\queue\\cli\\Command->handleMessage(1, "
+        . "'O:22:\"app\\\\jobs\\\\Ch...', 300, 1)\n#1 {main}.";
+
+    /**
+     * What yii2-queue's LogBehavior logs for a stored job it can't read as a job, here because the job's class was
+     * renamed after the job was queued: the exception holds a dump of the job, with all its data.
+     */
+    private const UNREADABLE_JOB_LINE = "[1] unknown job (attempt: 1) is finished with error: yii\\queue\\InvalidJobException: "
+        . "Job must be a JobInterface instance instead of __PHP_Incomplete_Class#1\n(\n"
+        . "    [__PHP_Incomplete_Class_Name] => 'app\\\\jobs\\\\ChargeJob'\n    [orderId] => 1001\n"
+        . "    [email] => 'bob@example.com'\n    [cardNumber] => '4111111111111111'\n). in /app/vendor/yiisoft/yii2-queue/src/Queue.php:282\n"
+        . "Stack trace:\n#0 /app/vendor/yiisoft/yii2-queue/src/Queue.php(229): yii\\queue\\Queue->unserializeMessage('O:22:\"app\\\\jobs\\\\Ch...')\n#1 {main}.";
+
     public function testLogLinesDoNotContainTheClientIpUserIdOrSessionIdByDefault(): void
     {
         $this->appWithLogTarget();
@@ -46,6 +68,70 @@ final class LogTargetTest extends TestCase
         $logs = $this->exportTwoMessages();
 
         $this->assertStringContainsString('[custom]', $logs);
+    }
+
+    public function testWhatAFailedQueueJobsProcessPrintedIsNotSent(): void
+    {
+        $this->appWithLogTarget();
+
+        Yii::error(self::FAILED_JOB_PROCESS_LINE, 'yii\queue\Queue');
+        Yii::getLogger()->flush(true);
+
+        $event = $this->singleEvent();
+        $expected = substr(self::FAILED_JOB_PROCESS_LINE, 0, (int)strpos(self::FAILED_JOB_PROCESS_LINE, "\n\nOutput:")) . "\n\nOutput: [not sent]";
+        $this->assertSame($expected, $event['message'] ?? null);
+        $this->assertSame($expected, $event['extra']['real_body'] ?? null);
+        $this->assertStringEndsWith("Working directory: /app\n\nOutput: [not sent]", $expected);
+        $sent = (string)json_encode($event);
+        $this->assertStringNotContainsString('4111111111111111', $sent);
+        $this->assertStringNotContainsString('sk_live_123', $sent);
+    }
+
+    public function testWhatAFailedQueueJobsProcessPrintedIsNotSentWithTheOtherLogLinesEither(): void
+    {
+        $this->appWithLogTarget();
+
+        Yii::error(self::FAILED_JOB_PROCESS_LINE, 'yii\queue\Queue');
+        Yii::error('a later problem', 'app');
+        Yii::getLogger()->flush(true);
+
+        $event = $this->singleEvent();
+        $this->assertSame('a later problem', $event['message'] ?? null);
+        $sent = (string)json_encode($event);
+        $this->assertStringContainsString('Output: [not sent]', $sent);
+        $this->assertStringNotContainsString('4111111111111111', $sent);
+        $this->assertStringNotContainsString('sk_live_123', $sent);
+    }
+
+    public function testTheDataOfAQueueJobThatCannotBeReadIsNotSent(): void
+    {
+        $this->appWithLogTarget();
+
+        Yii::error(self::UNREADABLE_JOB_LINE, 'yii\queue\Queue');
+        Yii::getLogger()->flush(true);
+
+        $event = $this->singleEvent();
+        $this->assertSame(
+            '[1] unknown job (attempt: 1) is finished with error: yii\queue\InvalidJobException: Job must be a JobInterface '
+                . 'instance instead of __PHP_Incomplete_Class (app\jobs\ChargeJob).',
+            $event['message'] ?? null
+        );
+        $sent = (string)json_encode($event);
+        $this->assertStringNotContainsString('bob@example.com', $sent);
+        $this->assertStringNotContainsString('4111111111111111', $sent);
+    }
+
+    public function testTheApplicationsOwnLinesAreSentAsWritten(): void
+    {
+        $this->appWithLogTarget();
+
+        Yii::error(self::FAILED_JOB_PROCESS_LINE, 'app');
+        Yii::error(self::UNREADABLE_JOB_LINE, 'app');
+        Yii::getLogger()->flush(true);
+
+        $event = $this->singleEvent();
+        $this->assertSame(self::UNREADABLE_JOB_LINE, $event['message'] ?? null);
+        $this->assertStringContainsString('Charging card 4111111111111111', implode("\n", (array)($event['extra']['logs'] ?? [])));
     }
 
     /**

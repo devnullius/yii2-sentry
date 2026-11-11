@@ -11,6 +11,10 @@ All notable changes to this project are documented here. The format is based on
 - `piiBodyFields` was not applied to forms sent as `multipart/form-data`, such as forms with a file field: PHP reads
   such a body itself, and the SDK's `RequestIntegration` then sent the fields unfiltered. They are now filtered like
   the fields of other forms, and left out when the route is not resolved.
+- The line yii2-queue's `LogBehavior` logs about a failed job was sent to Sentry as it was, with any of the job's data
+  it held: everything the job's process printed, when a worker runs the job in a process of its own (yii2-queue's
+  default) and that process fails, e.g. because the job exited; and a dump of the job with all its data, when a stored
+  job can't be read as a job, e.g. because its class was renamed after it was queued. That data is now left out.
 
 ## [4.1.0] - 2026-11-10
 
