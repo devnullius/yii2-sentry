@@ -104,6 +104,29 @@ final class IntegrationTest extends TestCase
         }
     }
 
+    public function testMultipartFormsAreFilteredLikeOtherForms(): void
+    {
+        // PHP reads a multipart/form-data body into $_POST itself and leaves the raw body empty.
+        $integration = new Integration();
+        $integration->piiBodyFields = ['site/post-log' => ['password']];
+        $_POST = ['username' => 'alice', 'password' => 'hunter2'];
+        $app = $this->createWebApp(['integrations' => [$integration]], [
+            'REQUEST_METHOD' => 'POST',
+            'REQUEST_URI' => '/site/post-log',
+            'CONTENT_TYPE' => 'multipart/form-data; boundary=x',
+        ]);
+        $app->getRequest()->setRawBody('');
+        $this->runningAction($app, 'post-log');
+
+        $app->get('sentry')->getHub()->captureMessage('hello');
+
+        $event = $this->singleEvent();
+        $this->assertSame(['username' => 'alice', 'password' => '[Filtered PII]'], $event['extra']['decodedParams'] ?? null);
+        // Without a "data" key, the SDK's RequestIntegration would add the fields unfiltered.
+        $this->assertArrayHasKey('data', $event['request'] ?? []);
+        $this->assertStringNotContainsString('hunter2', (string)json_encode($event));
+    }
+
     public function testSubclassesOfTheIntegrationAreApplied(): void
     {
         $app = $this->createWebApp(['integrations' => [new SubIntegration()]]);

@@ -248,15 +248,21 @@ class Integration implements IntegrationInterface
             return;
         }
 
-        $rawBody = $request->getRawBody();
-        if ($rawBody === '') {
-            return;
-        }
-
         $filterFields = !$options->shouldSendDefaultPii() && $this->piiBodyFields !== [];
         // No action is resolved yet when a request fails before routing, e.g. in bootstrap or "beforeRequest".
         $action = Yii::$app->requestedAction;
         $actionId = $action !== null ? $action->getUniqueId() : null;
+
+        $rawBody = $request->getRawBody();
+        if ($rawBody === '') {
+            // PHP reads a multipart/form-data body into $_POST and $_FILES itself and leaves the raw body empty. The
+            // SDK's RequestIntegration then adds the fields as they are, so the ones piiBodyFields applies to must be
+            // handled here.
+            $isMultipartForm = $_POST !== [] || $_FILES !== [];
+            if (!$isMultipartForm || !$filterFields || ($actionId !== null && !isset($this->piiBodyFields[$actionId]))) {
+                return;
+            }
+        }
 
         if ($filterFields && $actionId === null) {
             // No route's rules can be applied: leave the body out rather than send fields they may cover.

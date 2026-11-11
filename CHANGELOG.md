@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [4.1.1] - 2026-11-11
+
+### Security
+
+- `piiBodyFields` was not applied to forms sent as `multipart/form-data`, such as forms with a file field: PHP reads
+  such a body itself, and the SDK's `RequestIntegration` then sent the fields unfiltered. They are now filtered like
+  the fields of other forms, and left out when the route is not resolved.
+
 ## [4.1.0] - 2026-11-10
 
 ### Security
@@ -92,6 +100,7 @@ All notable changes to this project are documented here. The format is based on
 
 [#1]: https://github.com/devnullius/yii2-sentry/issues/1
 [#2]: https://github.com/devnullius/yii2-sentry/pull/2
+[4.1.1]: https://github.com/devnullius/yii2-sentry/compare/4.1.0...4.1.1
 [4.1.0]: https://github.com/devnullius/yii2-sentry/compare/4.0.1...4.1.0
 [4.0.1]: https://github.com/devnullius/yii2-sentry/compare/4.0.0...4.0.1
 [4.0.0]: https://github.com/devnullius/yii2-sentry/compare/1.9.3...4.0.0

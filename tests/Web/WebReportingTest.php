@@ -141,6 +141,28 @@ final class WebReportingTest extends WebServerTestCase
         $this->assertStringNotContainsString('hunter2', (string)json_encode($this->singleEvent($response)));
     }
 
+    public function testAMultipartFormIsFilteredToo(): void
+    {
+        // PHP reads a multipart body into $_POST itself. Up to 4.1.0, the SDK then added the fields unfiltered.
+        [$contentType, $body] = self::multipartForm(['profile[phone]' => '555-0100', 'profile[city]' => 'Paris']);
+
+        $response = $this->request('pii_nested', 'POST', '/site/post-log', [$contentType], $body);
+
+        $event = $this->singleEvent($response);
+        $this->assertStringNotContainsString('555-0100', (string)json_encode($event));
+        $this->assertSame(['phone' => '[Filtered PII]', 'city' => 'Paris'], $event['extra']['decodedParams']['profile'] ?? null);
+    }
+
+    public function testAMultipartBodyIsLeftOutWhenNoRouteRuleCanBeApplied(): void
+    {
+        [$contentType, $body] = self::multipartForm(['username' => 'alice', 'password' => 'hunter2']);
+
+        $response = $this->request('api_pii', 'POST', '/site/post-log', [$contentType], $body);
+
+        $this->assertSame(500, $response['status']);
+        $this->assertStringNotContainsString('hunter2', (string)json_encode($this->singleEvent($response)));
+    }
+
     public function testTheSdkDataCollectionPolicyIsHonored(): void
     {
         $response = $this->request('data_collection', 'POST', '/site/post-log', self::FORM, 'username=alice&password=hunter2');
@@ -173,5 +195,21 @@ final class WebReportingTest extends WebServerTestCase
         $headers = json_encode($this->singleEvent($response)['request']['headers'] ?? []);
         $this->assertStringNotContainsString('198.51.100.23', (string)$headers, 'The visitor IP is personal data.');
         $this->assertStringNotContainsString('c2VjcmV0', (string)$headers);
+    }
+
+    /**
+     * @param array<string, string> $fields
+     *
+     * @return array{0: string, 1: string} the Content-Type header and the body
+     */
+    private static function multipartForm(array $fields): array
+    {
+        $boundary = 'test-boundary';
+        $body = '';
+        foreach ($fields as $name => $value) {
+            $body .= "--$boundary\r\nContent-Disposition: form-data; name=\"$name\"\r\n\r\n$value\r\n";
+        }
+
+        return ["Content-Type: multipart/form-data; boundary=$boundary", $body . "--$boundary--\r\n"];
     }
 }
