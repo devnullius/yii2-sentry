@@ -19,8 +19,6 @@ use Sentry\SentrySdk;
 use Sentry\State\Hub;
 use Sentry\State\HubInterface;
 use Sentry\State\Scope;
-use Sentry\Tracing\SpanContext;
-use Sentry\Tracing\TransactionContext;
 use Sentry\UserDataBag;
 use Throwable;
 use Yii;
@@ -31,11 +29,12 @@ use yii\base\Controller;
 use yii\base\Event;
 use yii\base\InlineAction;
 use yii\base\InvalidConfigException;
+use yii\helpers\Html;
 use yii\httpclient\Client;
-use yii\httpclient\RequestEvent;
 use yii\web\Response;
 use yii\web\User;
-use function Sentry\startTransaction;
+use function Sentry\getBaggage;
+use function Sentry\getTraceparent;
 
 class Component extends \yii\base\Component implements BootstrapInterface
 {
@@ -77,6 +76,23 @@ class Component extends \yii\base\Component implements BootstrapInterface
      * See the [[Integration]] properties for all settings.
      */
     public $privacy = [];
+    /**
+     * @var array<string, bool> What is traced, once tracing is on with the SDK's `traces_sample_rate` or
+     * `traces_sampler` option. All parts are on by default:
+     *
+     * - `requests`: a transaction for every web request, named by its route, with its HTTP status, timed from when
+     *   PHP received the request.
+     * - `commands`: a transaction for every console command.
+     * - `actions`: a span for every controller action.
+     * - `views`: a span for every view rendered.
+     * - `httpClient`: a span and a breadcrumb for every call made with yii2-httpclient, and the trace headers the
+     *   called service needs to continue the trace (to the hosts in the SDK's `trace_propagation_targets`, or all).
+     *   Breadcrumbs and trace headers are added without tracing too.
+     * - `database`: a span for every SQL query, with values masked, from Yii's DB profiling (`enableProfiling`).
+     * - `continueTraces`: continue the trace of the caller (the `sentry-trace` and `baggage` headers), so that this
+     *   request's errors and spans show in it; also without tracing.
+     */
+    public $tracing = [];
     /**
      * @var bool Whether to reuse a Sentry client that is already set up, e.g. by `\Sentry\init()` called before Yii
      * boots, instead of creating one from this component's configuration. The SDK options and integrations then
@@ -121,9 +137,22 @@ class Component extends \yii\base\Component implements BootstrapInterface
     private $manualIntegrations = [];
 
     /**
+     * @var array<string, bool> [[tracing]], with the defaults
+     */
+    private $tracingSettings = Tracer::DEFAULTS;
+    /**
+     * @var Integration|null this package's integration, as this component configured it
+     */
+    private $privacyIntegration;
+
+    /**
      * @var self|null the component whose settings apply to events, i.e. the most recently initialized one
      */
     private static $current;
+    /**
+     * @var Tracer|null the tracer of the application bootstrapped last
+     */
+    private static $tracer;
     /**
      * @var ClientInterface|null the last client a component created: it is not "existing" for the next component
      */
@@ -140,6 +169,8 @@ class Component extends \yii\base\Component implements BootstrapInterface
     public function init()
     {
         parent::init();
+
+        $this->tracingSettings = $this->validTracingSettings();
 
         $currentHub = SentrySdk::getCurrentHub();
         $existingClient = $currentHub->getClient();
@@ -194,53 +225,45 @@ class Component extends \yii\base\Component implements BootstrapInterface
         }
         self::$handlers = [];
 
+        // Registered first: the response is finished before anything is sent to Sentry after it.
         if ($this->sendAfterResponse) {
             $this->listen(Response::class, Response::EVENT_AFTER_SEND, function (): void {
                 $this->finishResponse();
             });
         }
 
-        $transaction = null;
-        $span = null;
+        if (self::$tracer !== null) {
+            // The previous application's request or command, if it never ended.
+            self::$tracer->end();
+        }
+        self::$tracer = new Tracer(
+            $this->hub,
+            $this->tracingSettings,
+            function (string $class, string $name, callable $handler): void {
+                $this->listen($class, $name, $handler);
+            },
+            function (): ?Scrubber {
+                return $this->privacyScrubber();
+            },
+            $this->rootPath()
+        );
+        try {
+            self::$tracer->start($app);
+        } catch (Throwable $exception) {
+            // E.g. request headers that can't be read: the application must still start.
+            Yii::warning('Unable to start Sentry tracing: ' . $exception, __METHOD__);
+        }
 
-        $this->listen(Controller::class, Controller::EVENT_BEFORE_ACTION, function (ActionEvent $event) use ($app, &$transaction, &$span) {
+        $this->listen(Controller::class, Controller::EVENT_BEFORE_ACTION, function (ActionEvent $event) use ($app): void {
             $action = $event->action;
             $route = $action->getUniqueId();
 
-            $transactionContext = new TransactionContext();
-            $transactionContext->setName($event->sender->id);
-            $transactionContext->setOp($route);
-
-            $transaction = startTransaction($transactionContext);
-
-            // Set the current transaction as the current span so we can retrieve it later
-            SentrySdk::getCurrentHub()->setSpan($transaction);
-
-            // Setup the context for the expensive operation span
-            $spanContext = new SpanContext();
-            $spanContext->setOp($route);
-
-            // Start the span
-            $span = $transaction->startChild($spanContext);
-
-            // Set the current span to the span we just started
-            SentrySdk::getCurrentHub()->setSpan($span);
-
-            $metadata = [];
-            // Retrieve action's function
-            if ($action instanceof InlineAction) {
-                $metadata['action'] = get_class($action->controller) . '::' . $action->actionMethod . '()';
-            } else {
-                $metadata['action'] = get_class($action) . '::run()';
-            }
-
-            // Set breadcrumb
             $this->hub->addBreadcrumb(new Breadcrumb(
                 Breadcrumb::LEVEL_INFO,
                 Breadcrumb::TYPE_NAVIGATION,
                 'route',
                 $route,
-                $metadata
+                ['action' => $action instanceof InlineAction ? get_class($action->controller) . '::' . $action->actionMethod . '()' : get_class($action) . '::run()']
             ));
 
             // Set "route" tag to the route that was requested: actions started later in the same request, like the
@@ -250,62 +273,49 @@ class Component extends \yii\base\Component implements BootstrapInterface
                 $scope->setTag('route', $requestedRoute);
             });
         });
+    }
 
-        $this->listen(Controller::class, Controller::EVENT_AFTER_ACTION, function (ActionEvent $event) use (&$transaction, &$span) {
-            // Nothing was started if our "before" handler did not run, e.g. because another handler marked the
-            // event as handled.
-            if ($span === null || $transaction === null) {
-                return;
-            }
+    /**
+     * Returns the meta tags that let Sentry's browser SDK continue this request's trace, so that what happens in the
+     * browser and on the server shows as one trace. Print them in the `<head>` of your layout:
+     *
+     * ```php
+     * <?= Yii::$app->sentry->traceMetaTags() ?>
+     * ```
+     *
+     * Don't print them on pages that are cached as a whole: every visitor would join the same trace.
+     */
+    public function traceMetaTags(): string
+    {
+        return sprintf(
+            "<meta name=\"sentry-trace\" content=\"%s\">\n<meta name=\"baggage\" content=\"%s\">",
+            Html::encode(getTraceparent()),
+            Html::encode(getBaggage())
+        );
+    }
 
-            $span->finish();
+    /**
+     * Removes secrets and personal data from a line Yii itself logged, under the [[privacy]] settings.
+     *
+     * @internal used by [[LogTarget]]
+     */
+    public function scrubLogMessage(string $category, string $text): string
+    {
+        $client = $this->hub->getClient();
 
-            // Set the current span back to the transaction since we just finished the previous span
-            SentrySdk::getCurrentHub()->setSpan($transaction);
+        return $this->privacyIntegration !== null && $client !== null
+            ? $this->privacyIntegration->scrubLogMessage($category, $text, $client->getOptions())
+            : $text;
+    }
 
-            // Finish the transaction, this submits the transaction and it's span to Sentry
-            $transaction->finish();
-        });
-
-        if (class_exists(Client::class)) {
-            $httpClientTransaction = null;
-            $httpClientSpan = null;
-            $this->listen(Client::class, Client::EVENT_BEFORE_SEND, function (RequestEvent $event) use (&$httpClientTransaction, &$httpClientSpan) {
-                $transactionContext = new TransactionContext();
-                $transactionContext->setName($event->sender->baseUrl ?? 'remote.http.call');
-                $transactionContext->setOp($event->request->fullUrl ?? 'remote.http.url');
-
-                $httpClientTransaction = startTransaction($transactionContext);
-
-                // Set the current transaction as the current span so we can retrieve it later
-                SentrySdk::getCurrentHub()->setSpan($httpClientTransaction);
-
-                // Setup the context for the expensive operation span
-                $spanContext = new SpanContext();
-                $spanContext->setOp($event->request->fullUrl ?? 'remote.http.url');
-
-                // Start the span
-                $httpClientSpan = $httpClientTransaction->startChild($spanContext);
-
-                // Set the current span to the span we just started
-                SentrySdk::getCurrentHub()->setSpan($httpClientSpan);
-            });
-
-            $this->listen(Client::class, Client::EVENT_AFTER_SEND, function (RequestEvent $event) use (&$httpClientTransaction, &$httpClientSpan) {
-                // Nothing was started if our "before" handler did not run.
-                if ($httpClientSpan === null || $httpClientTransaction === null) {
-                    return;
-                }
-
-                $httpClientSpan->finish();
-
-                // Set the current span back to the transaction since we just finished the previous span
-                SentrySdk::getCurrentHub()->setSpan($httpClientTransaction);
-
-                // Finish the transaction, this submits the transaction and it's span to Sentry
-                $httpClientTransaction->finish();
-            });
-        }
+    /**
+     * Whether outgoing HTTP calls are added as breadcrumbs here, so that Yii's own log lines for them aren't needed.
+     *
+     * @internal used by [[LogTarget]]
+     */
+    public function tracesHttpClient(): bool
+    {
+        return $this->tracingSettings['httpClient'] && class_exists(Client::class);
     }
 
     public function getHub(): HubInterface
@@ -348,12 +358,38 @@ class Component extends \yii\base\Component implements BootstrapInterface
 
             if ($integration instanceof Integration) {
                 $this->applyPrivacySettings($integration);
+                $this->privacyIntegration = $this->privacyIntegration ?? $integration;
             }
 
             $integrations[] = $integration;
         }
 
         return $integrations;
+    }
+
+    /**
+     * @return array<string, bool>
+     *
+     * @throws InvalidConfigException on a setting that doesn't exist, e.g. a misspelled one
+     */
+    private function validTracingSettings(): array
+    {
+        foreach (array_keys($this->tracing) as $name) {
+            if (!array_key_exists($name, Tracer::DEFAULTS)) {
+                throw new InvalidConfigException(sprintf('Unknown Sentry tracing setting "%s".', $name));
+            }
+        }
+
+        return array_map('boolval', array_merge(Tracer::DEFAULTS, $this->tracing));
+    }
+
+    private function privacyScrubber(): ?Scrubber
+    {
+        $client = $this->hub->getClient();
+
+        return $this->privacyIntegration !== null && $client !== null
+            ? $this->privacyIntegration->createScrubber($client->getOptions())
+            : null;
     }
 
     /**
@@ -376,12 +412,24 @@ class Component extends \yii\base\Component implements BootstrapInterface
     /**
      * Registers a class-level event handler, remembering it so that a later bootstrap can remove it.
      *
+     * The handler runs inside the application's own work, e.g. while an action starts or a response is sent: a
+     * failure in it must not break that work, so it is logged as a warning instead.
+     *
      * @param callable $handler
      */
     private function listen(string $class, string $name, $handler): void
     {
-        Event::on($class, $name, $handler);
-        self::$handlers[] = [$class, $name, $handler];
+        $guarded = static function ($event) use ($handler, $name): void {
+            try {
+                $handler($event);
+            } catch (Throwable $exception) {
+                // Not __METHOD__: inside a closure it is "{closure:...}" on PHP 8.4+, which LogTarget would not exclude.
+                Yii::warning(sprintf('Unable to handle the "%s" event for Sentry: %s', $name, $exception), self::class);
+            }
+        };
+
+        Event::on($class, $name, $guarded);
+        self::$handlers[] = [$class, $name, $guarded];
     }
 
     /**
@@ -409,14 +457,23 @@ class Component extends \yii\base\Component implements BootstrapInterface
     private function pathOptions(): array
     {
         $vendor = Yii::getAlias('@vendor', false);
-        $root = $this->appBasePath !== null ? (string)Yii::getAlias($this->appBasePath) : self::projectRoot($vendor);
 
-        $options = ['prefixes' => self::withRealPaths([$root])];
+        $options = ['prefixes' => self::withRealPaths([$this->rootPath()])];
         if (is_string($vendor)) {
             $options['in_app_exclude'] = self::withRealPaths([$vendor]);
         }
 
         return $options;
+    }
+
+    /**
+     * The directory that file paths are shown relative to: [[appBasePath]], or the project root.
+     */
+    private function rootPath(): string
+    {
+        return $this->appBasePath !== null
+            ? (string)Yii::getAlias($this->appBasePath)
+            : self::projectRoot(Yii::getAlias('@vendor', false));
     }
 
     private static function registerEventProcessor(): void
@@ -449,6 +506,14 @@ class Component extends \yii\base\Component implements BootstrapInterface
                 }
             }
 
+            if ($type === 'event' && self::$tracer !== null) {
+                // Calls that failed before the event: the breadcrumbs were taken from the scope already.
+                $failedCalls = self::$tracer->reportFailedHttpCalls();
+                if ($failedCalls !== []) {
+                    $event->setBreadcrumb(array_merge($event->getBreadcrumbs(), $failedCalls));
+                }
+            }
+
             $app = Yii::$app;
             if ($app !== null) {
                 if ($type === 'event' && $this->routeAsTransaction) {
@@ -472,6 +537,16 @@ class Component extends \yii\base\Component implements BootstrapInterface
 
     private function setRouteAsTransaction(SentryEvent $event, Application $app): void
     {
+        // While the request is traced, its errors take the transaction's name, so that Sentry links the two.
+        $traced = $this->hub->getTransaction();
+        if ($traced !== null) {
+            if ($event->getTransaction() === null) {
+                $event->setTransaction($traced->getName());
+            }
+
+            return;
+        }
+
         $action = $app->requestedAction;
         if ($action === null) {
             return;

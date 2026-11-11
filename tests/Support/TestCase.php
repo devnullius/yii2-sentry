@@ -6,7 +6,9 @@ namespace devnullius\yii2\sentry\tests\Support;
 
 use devnullius\yii2\sentry\Component;
 use devnullius\yii2\sentry\Integration;
+use devnullius\yii2\sentry\tests\Fixtures\Console\HelloController;
 use Yii;
+use yii\console\Application as ConsoleApplication;
 use yii\web\Application;
 
 /**
@@ -46,17 +48,7 @@ abstract class TestCase extends \PHPUnit\Framework\TestCase
             'REMOTE_ADDR' => '203.0.113.10',
         ], $server);
 
-        $this->transport = new RecordingTransport();
-
-        $sentrySettings = $sentry['sentrySettings'] ?? [];
-        unset($sentry['sentrySettings']);
-        $sentryConfig = array_merge([
-            'class' => Component::class,
-            'dsn' => 'https://public@sentry.example.com/1',
-            // No SDK error listeners in-process: they would install global handlers inside PHPUnit.
-            'integrations' => [Integration::class],
-        ], $sentry);
-        $sentryConfig['sentrySettings'] = array_merge(['transport' => $this->transport], $sentrySettings);
+        $sentryConfig = $this->sentryConfig($sentry);
 
         $request = array_merge([
             'cookieValidationKey' => 'test',
@@ -71,6 +63,7 @@ abstract class TestCase extends \PHPUnit\Framework\TestCase
             'basePath' => dirname(__DIR__) . '/Fixtures/WebApp',
             'vendorPath' => dirname(__DIR__, 2) . '/vendor',
             'runtimePath' => sys_get_temp_dir(),
+            'controllerNamespace' => 'devnullius\\yii2\\sentry\\tests\\Fixtures\\WebApp\\controllers',
             'bootstrap' => ['sentry'],
             'components' => array_merge([
                 'request' => $request,
@@ -81,6 +74,25 @@ abstract class TestCase extends \PHPUnit\Framework\TestCase
         $app->getRequest()->setIsConsoleRequest(false);
 
         return $app;
+    }
+
+    /**
+     * Builds a console application with the fixture "hello" command, like createWebApp() does for the web.
+     *
+     * @param array<string, mixed> $sentry     component config overrides, as for createWebApp()
+     * @param array<string, mixed> $components extra components
+     */
+    protected function createConsoleApp(array $sentry = [], array $components = []): ConsoleApplication
+    {
+        return new ConsoleApplication([
+            'id' => 'console-test',
+            'basePath' => dirname(__DIR__) . '/Fixtures/Console',
+            'vendorPath' => dirname(__DIR__, 2) . '/vendor',
+            'runtimePath' => sys_get_temp_dir(),
+            'controllerMap' => ['hello' => HelloController::class],
+            'bootstrap' => ['sentry'],
+            'components' => array_merge(['sentry' => $this->sentryConfig($sentry)], $components),
+        ]);
     }
 
     /**
@@ -102,6 +114,14 @@ abstract class TestCase extends \PHPUnit\Framework\TestCase
     }
 
     /**
+     * @return list<array<string, mixed>> the transactions sent to Sentry
+     */
+    protected function transactions(): array
+    {
+        return RecordingTransport::onlyType($this->transport->payloads, 'transaction');
+    }
+
+    /**
      * @return array<string, mixed>
      */
     protected function singleEvent(): array
@@ -110,5 +130,27 @@ abstract class TestCase extends \PHPUnit\Framework\TestCase
         $this->assertCount(1, $events, 'Expected exactly one event to be sent to Sentry.');
 
         return $events[0];
+    }
+
+    /**
+     * @param array<string, mixed> $sentry
+     *
+     * @return array<string, mixed> the Sentry component's config, recording into a new transport
+     */
+    private function sentryConfig(array $sentry): array
+    {
+        $this->transport = new RecordingTransport();
+
+        $sentrySettings = $sentry['sentrySettings'] ?? [];
+        unset($sentry['sentrySettings']);
+        $sentryConfig = array_merge([
+            'class' => Component::class,
+            'dsn' => 'https://public@sentry.example.com/1',
+            // No SDK error listeners in-process: they would install global handlers inside PHPUnit.
+            'integrations' => [Integration::class],
+        ], $sentry);
+        $sentryConfig['sentrySettings'] = array_merge(['transport' => $this->transport], $sentrySettings);
+
+        return $sentryConfig;
     }
 }

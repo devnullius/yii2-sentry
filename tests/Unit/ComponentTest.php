@@ -6,7 +6,6 @@ namespace devnullius\yii2\sentry\tests\Unit;
 
 use devnullius\yii2\sentry\Component;
 use devnullius\yii2\sentry\Integration;
-use devnullius\yii2\sentry\tests\Fixtures\WebApp\controllers\SiteController;
 use devnullius\yii2\sentry\tests\Support\FinishRecordingComponent;
 use devnullius\yii2\sentry\tests\Support\RecordingTransport;
 use devnullius\yii2\sentry\tests\Support\TestCase;
@@ -187,9 +186,15 @@ final class ComponentTest extends TestCase
         $this->createWebApp($tracing);
         $app = $this->createWebApp($tracing);
 
-        (new SiteController('site', $app))->runAction('index');
+        $app->runAction('site/index');
+        $app->getResponse()->trigger(Response::EVENT_AFTER_SEND);
 
-        $this->assertCount(1, RecordingTransport::onlyType($this->transport->payloads, 'transaction'));
+        $transactions = $this->transactions();
+        $this->assertCount(1, $transactions);
+        $actions = array_filter($transactions[0]['spans'] ?? [], static function (array $span): bool {
+            return ($span['op'] ?? null) === 'yii.action';
+        });
+        $this->assertCount(1, $actions, 'The action is traced once, not once per application built.');
     }
 
     public function testSendsToSentryAfterTheResponseHasBeenSent(): void

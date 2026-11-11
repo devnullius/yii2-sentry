@@ -227,10 +227,19 @@ class LogTarget extends Target
                 $this->captureEvent($hub, $message);
             }
 
-            if (($breadcrumbLevels & $level) !== 0) {
+            if (($breadcrumbLevels & $level) !== 0 && !$this->isCoveredElsewhere((string)$message[2])) {
                 $hub->addBreadcrumb($this->createBreadcrumb($message));
             }
         }
+    }
+
+    /**
+     * Whether the component adds breadcrumbs of its own for what the messages of this category are about.
+     */
+    private function isCoveredElsewhere(string $category): bool
+    {
+        // Every outgoing HTTP call gets a breadcrumb with its status code.
+        return strpos($category, 'yii\\httpclient\\') === 0 && $this->component->tracesHttpClient();
     }
 
     /**
@@ -462,8 +471,12 @@ class LogTarget extends Target
         }
 
         $text = is_string($body) ? $body : VarDumper::export($body);
+        if ($this->maskSqlValues && self::isSqlCategory($category)) {
+            $text = SqlMasker::mask($text);
+        }
 
-        return $this->maskSqlValues && self::isSqlCategory($category) ? SqlMasker::mask($text) : $text;
+        // Lines Yii itself writes, e.g. on logins, may carry secrets or personal data.
+        return $this->component->scrubLogMessage($category, $text);
     }
 
     /**

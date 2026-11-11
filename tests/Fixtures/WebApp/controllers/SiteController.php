@@ -83,6 +83,16 @@ final class SiteController extends Controller
         throw new RuntimeException('crash for user ' . var_export($id, true));
     }
 
+    public function actionRender(): string
+    {
+        return $this->renderPartial('hello', ['name' => 'Ann']);
+    }
+
+    public function actionQuery(): string
+    {
+        return (string)Yii::$app->getDb()->createCommand('SELECT :email AS email', [':email' => 'ann@example.com'])->queryScalar();
+    }
+
     public function actionOuter(): string
     {
         return (string)$this->run('site/inner');

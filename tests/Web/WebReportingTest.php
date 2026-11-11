@@ -105,6 +105,46 @@ final class WebReportingTest extends WebServerTestCase
         $this->assertStringNotContainsString($sessionId, (string)json_encode($response['events']), 'A session ID in Sentry allows session hijacking.');
     }
 
+    public function testARequestIsOneTransactionWithItsQueries(): void
+    {
+        $response = $this->request('tracing', 'GET', '/site/query');
+
+        $this->assertSame(200, $response['status'], $response['body']);
+        $this->assertCount(1, $response['transactions']);
+        $transaction = $response['transactions'][0];
+        $this->assertSame('site/query', $transaction['transaction'] ?? null);
+        $this->assertSame('ok', $transaction['contexts']['trace']['status'] ?? null);
+        $queries = array_values(array_filter($transaction['spans'] ?? [], static function (array $span): bool {
+            return ($span['op'] ?? null) === 'db.sql.query';
+        }));
+        $this->assertSame(['SELECT ? AS email'], array_column($queries, 'description'));
+    }
+
+    public function testAFailedRequestIsAFailedTransactionLinkedToItsError(): void
+    {
+        $response = $this->request('tracing', 'GET', '/site/throw');
+
+        $this->assertSame(500, $response['status']);
+        $this->assertCount(1, $response['transactions']);
+        $transaction = $response['transactions'][0];
+        $this->assertSame('site/throw', $transaction['transaction'] ?? null);
+        $this->assertSame('internal_error', $transaction['contexts']['trace']['status'] ?? null);
+        // The error is sent when the log is flushed at the end, after the transaction.
+        $event = $this->singleEvent($response);
+        $this->assertSame($transaction['contexts']['trace']['trace_id'] ?? null, $event['contexts']['trace']['trace_id'] ?? null);
+        $this->assertSame('site/throw', $event['transaction'] ?? null);
+    }
+
+    public function testAPageThatDoesNotExistIsNamedByItsPath(): void
+    {
+        $response = $this->request('tracing', 'GET', '/no/such/page');
+
+        $this->assertSame(404, $response['status']);
+        $transaction = $response['transactions'][0] ?? [];
+        $this->assertSame('/no/such/page', $transaction['transaction'] ?? null);
+        $this->assertSame('not_found', $transaction['contexts']['trace']['status'] ?? null);
+    }
+
     public function testSendDefaultPiiWithTracingKeepsServingAndReporting(): void
     {
         $response = $this->request('pii_on_tracing', 'GET', '/site/log-error');

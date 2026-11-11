@@ -354,7 +354,99 @@ final class PersonalDataTest extends TestCase
         $this->assertStringNotContainsString('ann@example.com', (string)json_encode($events));
     }
 
+    // --- Yii's own log lines ------------------------------------------------------------------------------------
+
+    /**
+     * @return array<string, array{0: string, 1: string, 2: string}>
+     */
+    public static function yiiLogLines(): array
+    {
+        return [
+            'login' => ['yii\web\User::login', "User '42' logged in from 203.0.113.10 with duration 0.", "User '[Filtered PII]' logged in from [Filtered PII] with duration 0."],
+            'login without session' => ['yii\web\User::login', "User '42' logged in from 203.0.113.10. Session not enabled.", "User '[Filtered PII]' logged in from [Filtered PII]. Session not enabled."],
+            'login by cookie' => ['yii\web\User::loginByCookie', "User '42' logged in from 2001:db8::1 via cookie.", "User '[Filtered PII]' logged in from [Filtered PII] via cookie."],
+            'logout' => ['yii\web\User::logout', "User '42' logged out from 203.0.113.10.", "User '[Filtered PII]' logged out from [Filtered PII]."],
+            'email' => ['yii\mail\BaseMailer::send', 'Sending email "Your order" to "ann@example.com, bob@example.com"', 'Sending email "Your order" to "[Filtered PII]"'],
+            'outgoing HTTP call' => [
+                'yii\httpclient\StreamTransport::send',
+                "POST https://api.example.com/v1/charges?api_key=k1\nAuthorization: Bearer sk_live_1\n\ncard=4111111111111111",
+                'POST https://api.example.com/v1/charges?api_key=[Filtered PII]',
+            ],
+            'database connection' => [
+                'yii\db\Connection::open',
+                'Opening DB connection: pgsql:host=db;dbname=app;password=db-secret',
+                'Opening DB connection: pgsql:host=db;dbname=app;password=[Filtered PII]',
+            ],
+        ];
+    }
+
+    /**
+     * Yii writes these lines itself, so the application can't keep secrets and personal data out of them.
+     *
+     * @dataProvider yiiLogLines
+     */
+    public function testYiisOwnLogLinesAreScrubbed(string $category, string $line, string $expected): void
+    {
+        $this->assertSame([$expected], $this->breadcrumbsAfter([[$category, $line]]));
+    }
+
+    public function testWithSendDefaultPiiYiisOwnLinesKeepPersonalDataButNotSecrets(): void
+    {
+        $breadcrumbs = $this->breadcrumbsAfter([
+            ['yii\web\User::login', "User '42' logged in from 203.0.113.10 with duration 0."],
+            ['yii\db\Connection::open', 'Opening DB connection: pgsql:host=db;password=db-secret'],
+        ], ['sentrySettings' => ['send_default_pii' => true]]);
+
+        $this->assertSame([
+            "User '42' logged in from 203.0.113.10 with duration 0.",
+            'Opening DB connection: pgsql:host=db;password=[Filtered PII]',
+        ], $breadcrumbs);
+    }
+
+    public function testYiisOwnLogLinesCanBeSentAsWritten(): void
+    {
+        $line = "User '42' logged in from 203.0.113.10 with duration 0.";
+
+        $this->assertSame([$line], $this->breadcrumbsAfter([['yii\web\User::login', $line]], ['privacy' => ['scrubYiiLogs' => false]]));
+    }
+
+    public function testYiisOwnLogLinesAreScrubbedInSentryLogsToo(): void
+    {
+        $this->breadcrumbsAfter([['yii\web\User::login', "User '42' logged in from 203.0.113.10 with duration 0."]], [], ['sentryLogs' => true]);
+
+        $this->assertContains(
+            "User '[Filtered PII]' logged in from [Filtered PII] with duration 0.",
+            array_column($this->transport->logs(), 'body')
+        );
+    }
+
     // --- Helpers ------------------------------------------------------------------------------------------------
+
+    /**
+     * Logs the lines, then an error, and returns the messages of the error event's breadcrumbs.
+     *
+     * @param list<array{0: string, 1: string}> $lines categories and messages, logged at the info level
+     * @param array<string, mixed> $sentry
+     * @param array<string, mixed> $target LogTarget settings
+     *
+     * @return list<string>
+     */
+    private function breadcrumbsAfter(array $lines, array $sentry = [], array $target = []): array
+    {
+        // Outgoing calls are breadcrumbs of their own while HTTP client tracing is on: test Yii's line instead.
+        $sentry['tracing'] = array_merge(['httpClient' => false], $sentry['tracing'] ?? []);
+        $this->createWebApp($sentry, [], [
+            'log' => ['targets' => ['sentry' => array_merge(['class' => LogTarget::class], $target)]],
+        ])->getLog();
+
+        foreach ($lines as [$category, $line]) {
+            Yii::info($line, $category);
+        }
+        Yii::error('a later problem', 'app');
+        Yii::getLogger()->flush(true);
+
+        return array_column($this->singleEvent()['breadcrumbs']['values'] ?? [], 'message');
+    }
 
     /**
      * @throws RuntimeException always

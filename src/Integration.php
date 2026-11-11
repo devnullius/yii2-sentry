@@ -120,6 +120,13 @@ class Integration implements IntegrationInterface
      */
     public $maskDatabaseErrors = true;
     /**
+     * @var bool Scrub the log lines Yii itself writes, which become breadcrumbs and Sentry Logs: outgoing HTTP calls
+     * keep only their method and URL (Yii logs every header and the body); logins and logouts lose the user ID and
+     * IP address, and emails their recipients, while personal data is hidden; a password in the DSN of a database
+     * connection is always scrubbed. Your application's own log lines are sent as they are written.
+     */
+    public $scrubYiiLogs = true;
+    /**
      * @var string|null Replaces scrubbed values.
      */
     public $piiReplaceText = '[Filtered PII]';
@@ -471,19 +478,84 @@ class Integration implements IntegrationInterface
     }
 
     /**
+     * Creates the scrubber for these settings and the client's options.
+     *
+     * @internal
+     */
+    public function createScrubber(?Options $options): Scrubber
+    {
+        $hidePersonalData = $this->scrubPersonalData ?? ($options === null || !$options->shouldSendDefaultPii());
+
+        return new Scrubber(
+            $this->scrubSecrets ? new FieldMatcher($this->secretFields) : null,
+            $this->scrubSecrets ? self::yiiSecretNames() : [],
+            $hidePersonalData ? new FieldMatcher($this->personalFields) : null,
+            $this->piiReplaceText
+        );
+    }
+
+    /**
+     * Removes secrets and personal data from a line Yii itself logged, see [[scrubYiiLogs]].
+     *
+     * @internal
+     */
+    public function scrubLogMessage(string $category, string $text, Options $options): string
+    {
+        if (!$this->scrubYiiLogs || strpos($category, 'yii\\') !== 0) {
+            return $text;
+        }
+
+        $replacement = (string)$this->piiReplaceText;
+        $replace = static function (string $pattern, callable $replace, string $text) use ($replacement): string {
+            // On a regular expression failure, show nothing rather than the data.
+            return preg_replace_callback($pattern, $replace, $text) ?? $replacement;
+        };
+
+        if (strpos($category, 'yii\\httpclient\\') === 0) {
+            // The method and URL; then every header, and the body.
+            return $this->createScrubber($options)->scrubUrl(explode("\n", $text, 2)[0]);
+        }
+
+        if ($category === 'yii\\db\\Connection::open' && $this->scrubSecrets) {
+            // E.g. "Opening DB connection: pgsql:host=db;dbname=app;password=secret"
+            return $replace('/((?:^|[;:])\s*(?:password|pwd)\s*=)[^;]*/i', static function (array $match) use ($replacement): string {
+                return $match[1] . $replacement;
+            }, $text);
+        }
+
+        // Yii logs a line for every SQL query: build nothing for the many lines left as they are.
+        if (!($this->scrubPersonalData ?? !$options->shouldSendDefaultPii())) {
+            return $text;
+        }
+
+        if (strpos($category, 'yii\\web\\User::') === 0) {
+            // E.g. "User '42' logged in from 203.0.113.10 with duration 0."
+            $text = $replace("/^User '.*?' (logged (?:in|out) from )/", static function (array $match) use ($replacement): string {
+                return "User '$replacement' " . $match[1];
+            }, $text);
+
+            return $replace('/(logged (?:in|out) from )[0-9A-Fa-f:.]*[0-9A-Fa-f]/', static function (array $match) use ($replacement): string {
+                return $match[1] . $replacement;
+            }, $text);
+        }
+
+        if ($category === 'yii\\mail\\BaseMailer::send') {
+            // E.g. 'Sending email "Your order" to "ann@example.com"'
+            return $replace('/^(Sending email ".*" to ")(.*)(")$/s', static function (array $match) use ($replacement): string {
+                return $match[1] . $replacement . $match[3];
+            }, $text);
+        }
+
+        return $text;
+    }
+
+    /**
      * @param Options|null $options without them, personal data is hidden
      */
     private function scrubber(?Options $options = null): Scrubber
     {
         if ($this->scrubber === null) {
-            $hidePersonalData = $this->scrubPersonalData ?? ($options === null || !$options->shouldSendDefaultPii());
-
-            $this->scrubber = new Scrubber(
-                $this->scrubSecrets ? new FieldMatcher($this->secretFields) : null,
-                $this->scrubSecrets ? self::yiiSecretNames() : [],
-                $hidePersonalData ? new FieldMatcher($this->personalFields) : null,
-                $this->piiReplaceText
-            );
+            $this->scrubber = $this->createScrubber($options);
         }
 
         return $this->scrubber;

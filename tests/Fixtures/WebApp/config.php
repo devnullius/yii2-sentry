@@ -7,6 +7,7 @@ use devnullius\yii2\sentry\Integration;
 use devnullius\yii2\sentry\LogTarget;
 use devnullius\yii2\sentry\tests\Support\Identity;
 use devnullius\yii2\sentry\tests\Support\RecordingTransport;
+use yii\db\Connection;
 use yii\log\FileTarget;
 
 /**
@@ -46,6 +47,9 @@ return static function (string $scenario, string $outDir, string $run): array {
             break;
         case 'pii_on':
             $sentry['sentrySettings']['send_default_pii'] = true;
+            break;
+        case 'tracing':
+            $sentry['sentrySettings']['traces_sample_rate'] = 1.0;
             break;
         case 'pii_on_tracing':
             $sentry['sentrySettings']['send_default_pii'] = true;
@@ -109,6 +113,7 @@ return static function (string $scenario, string $outDir, string $run): array {
             'session' => ['savePath' => "$outDir/sessions"],
             'user' => ['identityClass' => Identity::class, 'enableAutoLogin' => false],
             'errorHandler' => ['errorAction' => $errorAction],
+            'db' => ['class' => Connection::class, 'dsn' => 'sqlite::memory:'],
             'sentry' => $sentry,
             'log' => [
                 'targets' => [
