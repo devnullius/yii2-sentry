@@ -356,6 +356,18 @@ class Component extends \yii\base\Component implements BootstrapInterface
     }
 
     /**
+     * A secret, e.g. a session ID, as it may be sent: replaced under the [[privacy]] setting `scrubSecrets`.
+     *
+     * @internal used by [[LogTarget]]
+     */
+    public function scrubSecret(string $value): string
+    {
+        $integration = $this->privacyIntegration;
+
+        return $integration !== null && $integration->scrubSecrets ? (string)$integration->piiReplaceText : $value;
+    }
+
+    /**
      * Whether outgoing HTTP calls are added as breadcrumbs here, so that Yii's own log lines for them aren't needed.
      *
      * @internal used by [[LogTarget]]

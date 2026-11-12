@@ -57,8 +57,8 @@ class Integration implements IntegrationInterface
 
     /**
      * @var bool Scrub secrets: the values of fields, query parameters, headers, cookies and function arguments whose
-     * names are in [[secretFields]], and Yii's session, CSRF and identity cookies. Secrets are scrubbed even when the
-     * SDK's `send_default_pii` option is on.
+     * names are in [[secretFields]], Yii's session, CSRF and identity cookies, and the session ID in the log lines of
+     * [[LogTarget::$aggregate]] mode. Secrets are scrubbed even when the SDK's `send_default_pii` option is on.
      */
     public $scrubSecrets = true;
     /**

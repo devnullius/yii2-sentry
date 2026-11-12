@@ -22,6 +22,9 @@ use yii\di\Instance;
 use yii\helpers\VarDumper;
 use yii\log\Logger;
 use yii\log\Target;
+use yii\web\Request;
+use yii\web\Session;
+use yii\web\User;
 use function Sentry\logger;
 
 /**
@@ -150,19 +153,39 @@ class LogTarget extends Target
     }
 
     /**
-     * Yii's default prefix holds the client IP, user ID and session ID. A session ID is a credential, so the default
-     * prefix is only kept when the SDK may send personal data: with `send_default_pii`, or, when the SDK's
-     * `data_collection` option is set, with its `user_info`. A custom [[prefix]] is used as is.
+     * Yii's default prefix: the client IP, user ID and session ID. It is only kept when the SDK may send personal
+     * data: with `send_default_pii`, or, when the SDK's `data_collection` option is set, with its `user_info`. Even
+     * then, the session ID is replaced: it is a credential, a secret like Yii's session cookie (see the component's
+     * `privacy` setting `scrubSecrets`). A custom [[prefix]] is used as is.
      *
      * {@inheritdoc}
      */
     public function getMessagePrefix($message)
     {
-        if ($this->prefix !== null || DataCollectionPolicy::fromHub($this->component->getHub())->shouldCollectUserInfo()) {
+        if ($this->prefix !== null) {
             return parent::getMessagePrefix($message);
         }
 
-        return '';
+        $app = Yii::$app;
+        if ($app === null || !DataCollectionPolicy::fromHub($this->component->getHub())->shouldCollectUserInfo()) {
+            return '';
+        }
+
+        // Built as Yii builds it, except for the session ID.
+        $request = $app->getRequest();
+        $ip = $request instanceof Request ? $request->getUserIP() : '-';
+
+        $user = $app->has('user', true) ? $app->get('user') : null;
+        $identity = $user instanceof User ? $user->getIdentity(false) : null;
+        $userId = $identity !== null ? $identity->getId() : '-';
+
+        $sessionId = '-';
+        $session = $app->has('session', true) ? $app->get('session') : null;
+        if ($session instanceof Session && $session->getIsActive()) {
+            $sessionId = $this->component->scrubSecret((string)$session->getId());
+        }
+
+        return "[$ip][$userId][$sessionId]";
     }
 
     /**

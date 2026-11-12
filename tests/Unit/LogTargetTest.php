@@ -277,13 +277,33 @@ final class LogTargetTest extends TestCase
         $this->assertStringNotContainsString('[42]', $logs);
     }
 
-    public function testAggregatedLogLinesKeepYiisPrefixWhenSendingPiiIsEnabled(): void
+    public function testAggregatedLogLinesKeepTheClientIpAndUserIdButNotTheSessionIdWhenSendingPiiIsEnabled(): void
     {
         $this->appForPrefixTests(['send_default_pii' => true]);
 
         $logs = $this->exportTwoMessagesAggregated();
 
+        $this->assertStringContainsString('[203.0.113.10][42][[Filtered PII]]', $logs);
+        $this->assertStringNotContainsString(ActiveSession::ID, $logs, 'A session ID is a secret, like the session cookie.');
+    }
+
+    public function testAggregatedLogLinesKeepTheSessionIdWhenSecretsAreSent(): void
+    {
+        $this->appForPrefixTests(['send_default_pii' => true], [], ['scrubSecrets' => false]);
+
+        $logs = $this->exportTwoMessagesAggregated();
+
         $this->assertStringContainsString('[203.0.113.10][42][' . ActiveSession::ID . ']', $logs);
+    }
+
+    public function testWithoutASessionTheAggregatedPrefixSaysSoAsYiiDoes(): void
+    {
+        $this->appForPrefixTests(['send_default_pii' => true]);
+        Yii::$app->set('session', null);
+
+        $logs = $this->exportTwoMessagesAggregated();
+
+        $this->assertStringContainsString('[203.0.113.10][42][-]', $logs);
     }
 
     /**
@@ -348,10 +368,11 @@ final class LogTargetTest extends TestCase
     /**
      * @param array<string, mixed> $sentrySettings
      * @param array<string, mixed> $target
+     * @param array<string, mixed> $privacy
      */
-    private function appForPrefixTests(array $sentrySettings = [], array $target = []): void
+    private function appForPrefixTests(array $sentrySettings = [], array $target = [], array $privacy = []): void
     {
-        $app = $this->createWebApp(['sentrySettings' => $sentrySettings], [], [
+        $app = $this->createWebApp(['sentrySettings' => $sentrySettings, 'privacy' => $privacy], [], [
             'session' => ['class' => ActiveSession::class],
             'log' => ['targets' => ['sentry' => array_merge([
                 'class' => LogTarget::class,
