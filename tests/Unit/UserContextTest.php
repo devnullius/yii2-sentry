@@ -69,6 +69,34 @@ final class UserContextTest extends TestCase
         $this->assertSame('203.0.113.10', $user['ip_address'] ?? null, 'The rest of the personal data is still sent.');
     }
 
+    /**
+     * With the SDK's `data_collection` option, the SDK ignores `send_default_pii`: its `user_info` decides.
+     *
+     * @return array<string, array{0: array<string, mixed>, 1: int|null}>
+     */
+    public static function dataCollectionPolicies(): array
+    {
+        return [
+            'user info collected' => [['data_collection' => ['user_info' => true]], 42],
+            'user info not collected, despite send_default_pii' => [['send_default_pii' => true, 'data_collection' => ['user_info' => false]], null],
+        ];
+    }
+
+    /**
+     * @dataProvider dataCollectionPolicies
+     *
+     * @param array<string, mixed> $sentrySettings
+     */
+    public function testWithTheDataCollectionOptionTheUserIdFollowsItsUserInfo(array $sentrySettings, ?int $expected): void
+    {
+        $app = $this->createWebApp(['sentrySettings' => $sentrySettings]);
+
+        $app->getUser()->setIdentity(new Identity());
+        $app->get('sentry')->getHub()->captureMessage('a later request');
+
+        $this->assertSame($expected, $this->singleEvent()['user']['id'] ?? null);
+    }
+
     public function testLoginWithANonScalarIdentityIdKeepsWorking(): void
     {
         $app = $this->createWebApp(['sentrySettings' => ['send_default_pii' => true]]);

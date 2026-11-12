@@ -341,6 +341,36 @@ final class QueueTest extends TestCase
         $this->assertStringNotContainsString('bob@example.com', (string)json_encode($this->singleEvent()));
     }
 
+    /**
+     * With the SDK's `data_collection` option, the SDK ignores `send_default_pii`: its `user_info` decides.
+     *
+     * @return array<string, array{0: array<string, mixed>, 1: bool}>
+     */
+    public static function dataCollectionPolicies(): array
+    {
+        return [
+            'user info collected' => [['data_collection' => ['user_info' => true]], true],
+            'user info not collected, despite send_default_pii' => [['send_default_pii' => true, 'data_collection' => ['user_info' => false]], false],
+        ];
+    }
+
+    /**
+     * @dataProvider dataCollectionPolicies
+     *
+     * @param array<string, mixed> $sentrySettings
+     */
+    public function testPersonalDataInTheJobsDataFollowsTheDataCollectionOption(array $sentrySettings, bool $shown): void
+    {
+        $app = $this->queueApp(['sentrySettings' => $sentrySettings]);
+
+        $app->queue->push(new ChargeJob(['email' => 'bob@example.com', 'cardNumber' => '4111111111111111']));
+        $app->queue->run();
+
+        $data = $this->singleEvent()['contexts']['job']['data'] ?? [];
+        $this->assertSame($shown ? 'bob@example.com' : '[Filtered PII]', $data['email'] ?? null);
+        $this->assertSame('[Filtered PII]', $data['cardNumber'] ?? null, 'Secrets stay hidden.');
+    }
+
     public function testTheJobsDataFollowsTheSdksDataCollectionOption(): void
     {
         $app = $this->queueApp(['sentrySettings' => ['data_collection' => ['queues' => false]]]);

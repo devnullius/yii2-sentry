@@ -286,6 +286,38 @@ final class LogTargetTest extends TestCase
         $this->assertStringContainsString('[203.0.113.10][42][' . ActiveSession::ID . ']', $logs);
     }
 
+    /**
+     * With the SDK's `data_collection` option, the SDK ignores `send_default_pii`: its `user_info` decides.
+     *
+     * @return array<string, array{0: array<string, mixed>, 1: bool}>
+     */
+    public static function dataCollectionPolicies(): array
+    {
+        return [
+            'user info collected' => [['data_collection' => ['user_info' => true]], true],
+            'user info not collected, despite send_default_pii' => [['send_default_pii' => true, 'data_collection' => ['user_info' => false]], false],
+        ];
+    }
+
+    /**
+     * @dataProvider dataCollectionPolicies
+     *
+     * @param array<string, mixed> $sentrySettings
+     */
+    public function testWithTheDataCollectionOptionYiisPrefixFollowsItsUserInfo(array $sentrySettings, bool $kept): void
+    {
+        $this->appForPrefixTests($sentrySettings);
+
+        $logs = $this->exportTwoMessagesAggregated();
+
+        if ($kept) {
+            $this->assertStringContainsString('[203.0.113.10][42]', $logs);
+        } else {
+            $this->assertStringNotContainsString('203.0.113.10', $logs);
+            $this->assertStringNotContainsString('[42]', $logs);
+        }
+    }
+
     public function testACustomPrefixIsRespected(): void
     {
         $this->appForPrefixTests([], ['prefix' => static function (): string {

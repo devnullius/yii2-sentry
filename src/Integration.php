@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 namespace devnullius\yii2\sentry;
 
+use Sentry\DataCollection\DataCollectionPolicy;
 use Sentry\Event;
 use Sentry\Integration\IntegrationInterface;
 use Sentry\Options;
@@ -25,7 +26,8 @@ use function in_array;
  *
  * Secrets are scrubbed even when the SDK's `send_default_pii` option is on; personal data is hidden while it is off.
  * With the SDK's `data_collection` option, the SDK collects the request and function arguments under that policy
- * instead, and only database errors are masked here.
+ * instead, and only database errors are masked here; elsewhere, e.g. in Yii's log lines, personal data is then hidden
+ * while that option doesn't collect user info.
  */
 class Integration implements IntegrationInterface
 {
@@ -69,7 +71,8 @@ class Integration implements IntegrationInterface
     /**
      * @var bool|null Hide personal data: the values of fields, query parameters, headers and function arguments whose
      * names are in [[personalFields]] or [[piiBodyFields]], and the headers in [[piiHeaders]]. By default (null),
-     * it is hidden while the SDK's `send_default_pii` option is off; `true` always hides it, `false` never does.
+     * it is hidden while the SDK's `send_default_pii` option is off, or, when the SDK's `data_collection` option is
+     * set, while that doesn't collect user info (`user_info`); `true` always hides it, `false` never does.
      * The visitor's IP address and cookies are only sent with `send_default_pii`.
      */
     public $scrubPersonalData;
@@ -485,12 +488,10 @@ class Integration implements IntegrationInterface
      */
     public function createScrubber(?Options $options): Scrubber
     {
-        $hidePersonalData = $this->scrubPersonalData ?? ($options === null || !$options->shouldSendDefaultPii());
-
         return new Scrubber(
             $this->scrubSecrets ? new FieldMatcher($this->secretFields) : null,
             $this->scrubSecrets ? self::yiiSecretNames() : [],
-            $hidePersonalData ? new FieldMatcher($this->personalFields) : null,
+            $this->hidesPersonalData($options) ? new FieldMatcher($this->personalFields) : null,
             $this->piiReplaceText
         );
     }
@@ -531,7 +532,7 @@ class Integration implements IntegrationInterface
         }
 
         // Yii logs a line for every SQL query: build nothing for the many lines left as they are.
-        if (!($this->scrubPersonalData ?? !$options->shouldSendDefaultPii())) {
+        if (!$this->hidesPersonalData($options)) {
             return $text;
         }
 
@@ -566,6 +567,22 @@ class Integration implements IntegrationInterface
         }
 
         return $this->scrubber;
+    }
+
+    /**
+     * Whether personal data is hidden: as [[scrubPersonalData]] says, or by default while the SDK may not send it.
+     * That is without `send_default_pii`, or, when the SDK's `data_collection` option is set (the SDK then ignores
+     * `send_default_pii`), while that doesn't collect user info.
+     *
+     * @param Options|null $options without them, personal data is hidden
+     */
+    private function hidesPersonalData(?Options $options): bool
+    {
+        if ($this->scrubPersonalData !== null) {
+            return (bool)$this->scrubPersonalData;
+        }
+
+        return !DataCollectionPolicy::fromOptions($options)->shouldCollectUserInfo();
     }
 
     private function addUserIpAddress(Event $event, ?string $ipAddress, ?string $remoteIp): void

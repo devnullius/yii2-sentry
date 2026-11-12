@@ -4,6 +4,7 @@ declare(strict_types=1);
 namespace devnullius\yii2\sentry;
 
 use Sentry\Breadcrumb;
+use Sentry\DataCollection\DataCollectionPolicy;
 use Sentry\Event;
 use Sentry\EventHint;
 use Sentry\ExceptionMechanism;
@@ -150,13 +151,14 @@ class LogTarget extends Target
 
     /**
      * Yii's default prefix holds the client IP, user ID and session ID. A session ID is a credential, so the default
-     * prefix is only kept when the SDK may send personal data (`send_default_pii`). A custom [[prefix]] is used as is.
+     * prefix is only kept when the SDK may send personal data: with `send_default_pii`, or, when the SDK's
+     * `data_collection` option is set, with its `user_info`. A custom [[prefix]] is used as is.
      *
      * {@inheritdoc}
      */
     public function getMessagePrefix($message)
     {
-        if ($this->prefix !== null || $this->shouldSendDefaultPii()) {
+        if ($this->prefix !== null || DataCollectionPolicy::fromHub($this->component->getHub())->shouldCollectUserInfo()) {
             return parent::getMessagePrefix($message);
         }
 
@@ -533,13 +535,6 @@ class LogTarget extends Target
         }
 
         return $levels;
-    }
-
-    private function shouldSendDefaultPii(): bool
-    {
-        $client = $this->component->getHub()->getClient();
-
-        return $client !== null && $client->getOptions()->shouldSendDefaultPii();
     }
 
     /**

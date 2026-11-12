@@ -8,6 +8,7 @@ use ReflectionClass;
 use Sentry\Breadcrumb;
 use Sentry\ClientBuilder;
 use Sentry\ClientInterface;
+use Sentry\DataCollection\DataCollectionPolicy;
 use Sentry\Event as SentryEvent;
 use Sentry\Integration\EnvironmentIntegration;
 use Sentry\Integration\FrameContextifierIntegration;
@@ -109,8 +110,9 @@ class Component extends \yii\base\Component implements BootstrapInterface
      * - `retries`: also report a failed attempt that yii2-queue will retry. Turn it off to report a job only once it
      *   has failed for good.
      * - `jobData`: add the job's public properties to its events, scrubbed like request bodies (see [[privacy]]):
-     *   secrets are always hidden, personal data while the SDK's `send_default_pii` is off. Never when the SDK's
-     *   `data_collection` option is set with `queues` off.
+     *   secrets are always hidden, personal data while the SDK's `send_default_pii` is off (or, when the SDK's
+     *   `data_collection` option is set, while that doesn't collect `user_info`). Never when `data_collection` is set
+     *   with `queues` off.
      * - `breadcrumbs`: a breadcrumb for every job queued, in place of the lines `LogBehavior` logs.
      *
      * A job a worker runs also has a scope of its own: its events don't carry what the job before it did. The log
@@ -670,15 +672,8 @@ class Component extends \yii\base\Component implements BootstrapInterface
             return (bool)$this->sendUserId;
         }
 
-        $client = $this->hub->getClient();
-        if ($client === null) {
-            return false;
-        }
-
-        $options = $client->getOptions();
-        $dataCollection = $options->getDataCollection();
-
-        return $dataCollection !== null ? $dataCollection->shouldCollectUserInfo() : $options->shouldSendDefaultPii();
+        // With send_default_pii, or the data_collection option's user_info when that is set.
+        return DataCollectionPolicy::fromHub($this->hub)->shouldCollectUserInfo();
     }
 
     /**
