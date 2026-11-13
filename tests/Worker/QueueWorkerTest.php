@@ -8,11 +8,9 @@ use devnullius\yii2\sentry\tests\Fixtures\Jobs\ChargeJob;
 use devnullius\yii2\sentry\tests\Fixtures\Jobs\CrashingJob;
 use devnullius\yii2\sentry\tests\Fixtures\Jobs\GreetJob;
 use devnullius\yii2\sentry\tests\Fixtures\Jobs\SlowJob;
-use devnullius\yii2\sentry\tests\Support\RecordingTransport;
-use PHPUnit\Framework\TestCase;
+use devnullius\yii2\sentry\tests\Support\ConsoleProcessTestCase;
 use Symfony\Component\Process\Exception\ProcessFailedException;
 use Symfony\Component\Process\Exception\ProcessTimedOutException;
-use yii\helpers\FileHelper;
 use yii\queue\file\Queue;
 use yii\queue\JobInterface;
 
@@ -20,24 +18,8 @@ use yii\queue\JobInterface;
  * End-to-end: a real yii2-queue worker ("yii queue/run", tests/Fixtures/Console/yii) running every job in a child
  * process of its own, as it does by default. The worker and its child processes all record what the SDK would send.
  */
-final class QueueWorkerTest extends TestCase
+final class QueueWorkerTest extends ConsoleProcessTestCase
 {
-    /**
-     * @var string
-     */
-    private $dir = '';
-
-    protected function setUp(): void
-    {
-        $this->dir = sys_get_temp_dir() . '/yii2-sentry-worker-' . bin2hex(random_bytes(4));
-        FileHelper::createDirectory($this->dir . '/queue');
-    }
-
-    protected function tearDown(): void
-    {
-        FileHelper::removeDirectory($this->dir);
-    }
-
     public function testAFailedJobIsReportedFromItsOwnProcess(): void
     {
         $this->push(new ChargeJob(['orderId' => 1001, 'email' => 'bob@example.com']));
@@ -160,51 +142,11 @@ final class QueueWorkerTest extends TestCase
      * Runs "yii queue/run": the worker handles every job queued, each in a child process, and stops.
      *
      * @return array{exitCode: int, log: string, payloads: list<array<string, mixed>>, events: list<array<string, mixed>>,
-     *               transactions: list<array<string, mixed>>}
+     *               transactions: list<array<string, mixed>>, checkIns: list<array<string, mixed>>}
      */
     private function runWorker(string $scenario = 'default'): array
     {
         return $this->runCommand(['queue/run'], '', $scenario);
-    }
-
-    /**
-     * Runs a console command of the test application.
-     *
-     * @param list<string> $arguments
-     *
-     * @return array{exitCode: int, log: string, payloads: list<array<string, mixed>>, events: list<array<string, mixed>>,
-     *               transactions: list<array<string, mixed>>}
-     */
-    private function runCommand(array $arguments, string $input, string $scenario): array
-    {
-        $outFile = $this->dir . '/sentry.jsonl';
-        $logFile = $this->dir . '/worker.log';
-        $env = getenv();
-        $env['SENTRY_TEST_SCENARIO'] = $scenario;
-        $env['SENTRY_TEST_OUT_FILE'] = $outFile;
-        $env['SENTRY_TEST_QUEUE_PATH'] = $this->dir . '/queue';
-
-        $process = proc_open(
-            array_merge([PHP_BINARY, dirname(__DIR__) . '/Fixtures/Console/yii'], $arguments),
-            [0 => ['pipe', 'r'], 1 => ['file', $logFile, 'a'], 2 => ['file', $logFile, 'a']],
-            $pipes,
-            null,
-            $env
-        );
-        $this->assertIsResource($process);
-        fwrite($pipes[0], $input);
-        fclose($pipes[0]);
-        $exitCode = proc_close($process);
-
-        $payloads = RecordingTransport::readFile($outFile);
-
-        return [
-            'exitCode' => $exitCode,
-            'log' => "Worker output:\n" . (string)@file_get_contents($logFile),
-            'payloads' => $payloads,
-            'events' => RecordingTransport::onlyType($payloads, 'event'),
-            'transactions' => RecordingTransport::onlyType($payloads, 'transaction'),
-        ];
     }
 
     /**

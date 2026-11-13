@@ -2,9 +2,9 @@
 
 declare(strict_types=1);
 
-// Console entry script for the queue worker tests (tests/Worker): a real yii2-queue worker, and the child process it
-// starts for each job with this same script. Every process records what the SDK would send to the file named by
-// SENTRY_TEST_OUT_FILE.
+// Console entry script for the end-to-end tests: a real yii2-queue worker and the child process it starts for each job
+// with this same script (tests/Worker), and commands as cron runs them (tests/Console). Every process records what the
+// SDK would send to the file named by SENTRY_TEST_OUT_FILE.
 
 // Like php.ini-production: deprecations are not reported.
 error_reporting(E_ALL & ~E_DEPRECATED & ~E_USER_DEPRECATED);

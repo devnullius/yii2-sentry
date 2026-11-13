@@ -30,6 +30,7 @@ use yii\base\Controller;
 use yii\base\Event;
 use yii\base\InlineAction;
 use yii\base\InvalidConfigException;
+use yii\console\Application as ConsoleApplication;
 use yii\helpers\Html;
 use yii\httpclient\Client;
 use yii\queue\Queue;
@@ -123,6 +124,37 @@ class Component extends \yii\base\Component implements BootstrapInterface
      */
     public $queue = [];
     /**
+     * @var array<int|string, mixed> Console commands to monitor with Sentry Crons, by route, as in the crontab line
+     * that runs them. Sentry is told when each run starts and how it ends: succeeded (exit code 0) or failed (another
+     * exit code, or a crash), so that it alerts when a run fails, takes too long or doesn't happen at all. The errors
+     * a run reports show with it. Nothing is monitored by default. For example:
+     *
+     * ```php
+     * 'cronMonitors' => [
+     *     // Reports to the monitor "report-daily", set up in Sentry.
+     *     'report/daily',
+     *     // Reports to the monitor "nightly-cleanup", set up in Sentry.
+     *     'cleanup/run' => 'nightly-cleanup',
+     *     // Creates or updates the monitor in Sentry, at every run.
+     *     'billing/charge' => [
+     *         'slug' => 'billing',            // the monitor's name; by default from the route, "billing-charge"
+     *         'schedule' => '0 3 * * *',      // as in the crontab line: keep the two the same
+     *         'timezone' => 'Europe/Berlin',  // of the schedule; Sentry assumes UTC
+     *         'checkinMargin' => 5,           // minutes a run may start late before it counts as missed
+     *         'maxRuntime' => 30,             // minutes a run may take before it counts as timed out
+     *         'failureIssueThreshold' => 2,   // failed runs in a row before Sentry opens an issue
+     *         'recoveryThreshold' => 1,       // successful runs in a row before Sentry resolves it
+     *     ],
+     * ],
+     * ```
+     *
+     * Sentry's defaults apply to the settings left out. `schedule` can also be a `Sentry\MonitorSchedule`, e.g. an
+     * interval. Each run sends two check-ins, when it starts and when it ends. Return the exit code from the command's
+     * action: a run that ends otherwise, with `exit()`, `Yii::$app->end()` or an `ExitException`, is reported as
+     * failed, as its exit code can't be known.
+     */
+    public $cronMonitors = [];
+    /**
      * @var bool Whether to reuse a Sentry client that is already set up, e.g. by `\Sentry\init()` called before Yii
      * boots, instead of creating one from this component's configuration. The SDK options and integrations then
      * come from that client: [[dsn]], [[sentrySettings]] and the SDK integrations listed in [[integrations]] are
@@ -174,6 +206,10 @@ class Component extends \yii\base\Component implements BootstrapInterface
      */
     private $queueSettings = QueueListener::DEFAULTS;
     /**
+     * @var array<string, array{0: string, 1: \Sentry\MonitorConfig|null}> [[cronMonitors]], as CronMonitor reads it
+     */
+    private $cronMonitorSettings = [];
+    /**
      * @var Integration|null this package's integration, as this component configured it
      */
     private $privacyIntegration;
@@ -190,6 +226,10 @@ class Component extends \yii\base\Component implements BootstrapInterface
      * @var QueueListener|null the queue listener of the application bootstrapped last, when yii2-queue is installed
      */
     private static $queueListener;
+    /**
+     * @var CronMonitor|null the cron monitor of the console application bootstrapped last, when it lists commands
+     */
+    private static $cronMonitor;
     /**
      * @var ClientInterface|null the last client a component created: it is not "existing" for the next component
      */
@@ -209,6 +249,7 @@ class Component extends \yii\base\Component implements BootstrapInterface
 
         $this->tracingSettings = self::validSettings('tracing', $this->tracing, Tracer::DEFAULTS);
         $this->queueSettings = self::validSettings('queue', $this->queue, QueueListener::DEFAULTS);
+        $this->cronMonitorSettings = CronMonitor::monitors($this->cronMonitors);
 
         $currentHub = SentrySdk::getCurrentHub();
         $existingClient = $currentHub->getClient();
@@ -299,6 +340,16 @@ class Component extends \yii\base\Component implements BootstrapInterface
                 $scrubber
             );
             self::$queueListener->start();
+        }
+
+        if (self::$cronMonitor !== null) {
+            // The previous application's command, if it never ended.
+            self::$cronMonitor->end();
+        }
+        self::$cronMonitor = null;
+        if ($app instanceof ConsoleApplication && $this->cronMonitorSettings !== []) {
+            self::$cronMonitor = new CronMonitor($this->hub, $this->cronMonitorSettings, $listen);
+            self::$cronMonitor->start($app);
         }
 
         $this->listen(Controller::class, Controller::EVENT_BEFORE_ACTION, function (ActionEvent $event) use ($app): void {
