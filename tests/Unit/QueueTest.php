@@ -6,6 +6,7 @@ namespace devnullius\yii2\sentry\tests\Unit;
 
 use devnullius\yii2\sentry\Component;
 use devnullius\yii2\sentry\LogTarget;
+use devnullius\yii2\sentry\tests\Fixtures\Jobs\BusyJob;
 use devnullius\yii2\sentry\tests\Fixtures\Jobs\ChargeJob;
 use devnullius\yii2\sentry\tests\Fixtures\Jobs\DrainJob;
 use devnullius\yii2\sentry\tests\Fixtures\Jobs\FailedCallJob;
@@ -17,9 +18,15 @@ use devnullius\yii2\sentry\tests\Fixtures\Jobs\TracedJob;
 use devnullius\yii2\sentry\tests\Support\CutShortJsonSerializer;
 use devnullius\yii2\sentry\tests\Support\CutShortPhpSerializer;
 use devnullius\yii2\sentry\tests\Support\Identity;
+use devnullius\yii2\sentry\tests\Support\RecordingProfiler;
+use devnullius\yii2\sentry\tests\Support\RecordingTransport;
 use devnullius\yii2\sentry\tests\Support\RenamedClassSerializer;
 use devnullius\yii2\sentry\tests\Support\TestCase;
 use devnullius\yii2\sentry\tests\Support\UnreadableJobSerializer;
+use Sentry\Options;
+use Sentry\Profiling\ProfilerInterface;
+use Sentry\Profiling\Profiles;
+use Sentry\Tracing\Transaction;
 use UnexpectedValueException;
 use Yii;
 use yii\base\Event;
@@ -558,6 +565,70 @@ final class QueueTest extends TestCase
         $this->assertSame('internal_error', $charge['contexts']['trace']['status'] ?? null);
         // The failure is linked to its job's transaction.
         $this->assertSame($charge['contexts']['trace']['trace_id'] ?? null, $this->singleEvent()['contexts']['trace']['trace_id'] ?? null);
+    }
+
+    public function testTheCommandOfAWorkerIsFinishedWithoutBeingSent(): void
+    {
+        $app = $this->workerApp(['sentrySettings' => ['traces_sample_rate' => 1.0]]);
+        $command = $app->get('sentry')->getHub()->getSpan();
+        $app->queue->push(new GreetJob());
+
+        $this->runWorker($app);
+
+        $this->assertInstanceOf(Transaction::class, $command);
+        $this->assertSame('console.command', $command->getOp());
+        // Left unfinished, its profilers would keep running for as long as the worker runs.
+        $this->assertNotNull($command->getEndTimestamp());
+        $this->assertSame([GreetJob::class], array_column($this->transactions(), 'transaction'));
+    }
+
+    public function testTheProfilerOfAWorkersCommandStopsBeforeItsJobsAreProfiled(): void
+    {
+        if (!interface_exists(ProfilerInterface::class)) {
+            $this->markTestSkipped('The profiler_factory option needs sentry/sentry 4.35 or newer.');
+        }
+
+        $app = $this->workerApp(['sentrySettings' => [
+            'traces_sample_rate' => 1.0,
+            'profiles_sample_rate' => 1.0,
+            'profiler_factory' => static function (): RecordingProfiler {
+                return new RecordingProfiler();
+            },
+        ]]);
+        $app->queue->push(new GreetJob());
+
+        $this->runWorker($app);
+
+        // 1 profiles the command, 2 the job. Left running, 1 would sample for as long as the worker runs.
+        $this->assertSame(['1 start', '1 stop', '2 start', '2 stop'], RecordingProfiler::$log);
+    }
+
+    /**
+     * @requires extension excimer
+     */
+    public function testContinuousProfilingStopsOnceTheJobsOfAWorkerAreDone(): void
+    {
+        if (!method_exists(Options::class, 'getProfileLifecycle')) {
+            $this->markTestSkipped('Continuous profiling needs sentry/sentry 4.36 or newer.');
+        }
+
+        $app = $this->workerApp(['sentrySettings' => [
+            'traces_sample_rate' => 1.0,
+            'profile_session_sample_rate' => 1.0,
+            'profile_lifecycle' => 'trace',
+        ]]);
+        $app->queue->push(new BusyJob());
+
+        $this->runWorker($app);
+
+        // Waiting for the worker's command to end, the profiler would sample for as long as the worker runs, also
+        // while it waits for jobs, and send what it sampled every minute.
+        $this->assertFalse(Profiles::getInstance()->continuousProfiler()->isRunning());
+        [$busy] = $this->transactions();
+        $profilerId = $busy['contexts']['profile']['profiler_id'] ?? null;
+        $this->assertNotNull($profilerId, 'The job is linked to what was sampled during it.');
+        $chunks = RecordingTransport::onlyType($this->transport->payloads, 'profile_chunk');
+        $this->assertContains($profilerId, array_column($chunks, 'profiler_id'), 'What was sampled during the job is sent once it is done.');
     }
 
     public function testAJobsQueriesAreSpansOfItsOwnTransaction(): void

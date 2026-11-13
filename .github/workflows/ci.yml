@@ -30,6 +30,27 @@ jobs:
 
       - run: vendor/bin/phpunit
 
+  profiling:
+    name: Tests with the excimer profiler (PHP 8.4)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: curl, json, mbstring, pdo_sqlite, excimer
+          coverage: none
+
+      # Fails when excimer could not be installed, rather than skipping the tests that need it.
+      - run: php --ri excimer
+
+      - uses: ramsey/composer-install@v3
+        with:
+          dependency-versions: highest
+
+      - run: vendor/bin/phpunit
+
   static-analysis:
     name: Static analysis
     runs-on: ubuntu-latest

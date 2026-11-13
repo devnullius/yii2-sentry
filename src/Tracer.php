@@ -318,12 +318,18 @@ final class Tracer
      */
     public function stopTracingCommand(): void
     {
-        if ($this->transaction === null || $this->job !== null || $this->transaction->getOp() !== 'console.command') {
+        $transaction = $this->transaction;
+        if ($transaction === null || $this->job !== null || $transaction->getOp() !== 'console.command') {
             return;
         }
 
         $this->reset();
         $this->hub->setSpan(null);
+
+        // Finished without being sent: until it is finished, the SDK's profilers keep running for it, for as long as
+        // the worker runs.
+        $transaction->setSampled(false);
+        $transaction->finish();
     }
 
     /**
