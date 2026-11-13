@@ -15,6 +15,10 @@ All notable changes to this project are documented here. The format is based on
   it held: everything the job's process printed, when a worker runs the job in a process of its own (yii2-queue's
   default) and that process fails, e.g. because the job exited; and a dump of the job with all its data, when a stored
   job can't be read as a job, e.g. because its class was renamed after it was queued. That data is now left out.
+- Yii's own warnings about a login cookie or session whose auth key doesn't match were sent with the user ID, the
+  visitor's IP address and the key, and its warning about a database connection of a pool that couldn't be opened with
+  the connection's DSN, which may hold the password. The key and the password are now left out, and the user ID and IP
+  address too unless `send_default_pii` is enabled.
 
 ## [4.1.0] - 2026-11-10
 

@@ -16,6 +16,11 @@ use yii\log\Target;
 class LogTarget extends Target
 {
     /**
+     * Replaces what is left out of Yii's own warnings: the default text of [[Integration::$piiReplaceText]].
+     */
+    private const FILTERED = '[Filtered PII]';
+
+    /**
      * The Sentry component to pass logs to, or its application component ID.
      *
      * @var Component|string
@@ -74,12 +79,12 @@ class LogTarget extends Target
                 continue;
             }
 
-            $logs[] = $this->formatMessage(self::withoutJobData($message));
+            $logs[] = $this->formatMessage($this->scrubbed($message));
         }
 
         // Configure scope and capture error
         $this->component->getHub()->withScope(function (Scope $scope) use ($primaryMessage, $logs) {
-            [$body, $level, $category, $timestamp] = self::withoutJobData($primaryMessage);
+            [$body, $level, $category, $timestamp] = $this->scrubbed($primaryMessage);
 
             if (!empty($category)) {
                 $scope->setTag('category', $category);
@@ -156,6 +161,68 @@ class LogTarget extends Target
         $client = $this->component->getHub()->getClient();
 
         return $client !== null && $client->getOptions()->shouldSendDefaultPii();
+    }
+
+    /**
+     * The message without what the lines Yii and yii2-queue log themselves may hold and must not be sent.
+     *
+     * @param array<int, mixed> $message
+     *
+     * @return array<int, mixed>
+     */
+    private function scrubbed(array $message): array
+    {
+        return self::withoutJobData($this->withoutYiisSecrets($message));
+    }
+
+    /**
+     * Yii logs two warnings with secrets and personal data in them: yii\web\User's about a login cookie or session
+     * whose auth key doesn't match, with the user ID, the visitor's IP address and the key; and yii\db\Connection's
+     * about a connection of a pool that couldn't be opened, with its DSN, which may hold the password. The key and the
+     * password are left out, and the user ID and IP address too, unless the SDK may send personal data
+     * (`send_default_pii`).
+     *
+     * @param array<int, mixed> $message
+     *
+     * @return array<int, mixed>
+     */
+    private function withoutYiisSecrets(array $message): array
+    {
+        $category = (string)($message[2] ?? '');
+        $text = $message[0] ?? null;
+        if (!is_string($text)) {
+            return $message;
+        }
+
+        if (strpos($category, 'yii\web\User::') === 0) {
+            // E.g. "Invalid cookie auth key attempted for user '42' from 203.0.113.10: <the key>"
+            $keepPersonalData = $this->shouldSendDefaultPii();
+            $text = preg_replace_callback(
+                "/^(Invalid (?:cookie|session) auth key attempted for user ')(.*?)(' from )(\\S*)(: )(.*)$/s",
+                static function (array $match) use ($keepPersonalData): string {
+                    return $match[1] . ($keepPersonalData ? $match[2] : self::FILTERED) . $match[3]
+                        . ($keepPersonalData ? $match[4] : self::FILTERED) . $match[5] . self::FILTERED;
+                },
+                $text
+            );
+        } elseif (strpos($category, 'yii\db\Connection::') === 0) {
+            // E.g. "Connection (pgsql:host=replica;password=secret) failed: ...", or the line logged at the info level
+            // when a connection is opened: "Opening DB connection: pgsql:host=db;password=secret".
+            $text = preg_replace_callback(
+                '/((?:^|[;:])\s*(?:password|pwd)\s*=).*?(?=;|\) failed: |$)/i',
+                static function (array $match): string {
+                    return $match[1] . self::FILTERED;
+                },
+                $text
+            );
+        } else {
+            return $message;
+        }
+
+        // On a regular expression failure, send nothing rather than the data.
+        $message[0] = $text ?? self::FILTERED;
+
+        return $message;
     }
 
     /**

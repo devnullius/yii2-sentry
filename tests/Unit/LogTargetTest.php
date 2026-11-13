@@ -121,6 +121,73 @@ final class LogTargetTest extends TestCase
         $this->assertStringNotContainsString('4111111111111111', $sent);
     }
 
+    public function testYiisWarningAboutAnInvalidAuthKeyIsSentWithoutTheKeyUserIdAndIpAddress(): void
+    {
+        $this->appWithLogTarget();
+
+        Yii::warning("Invalid cookie auth key attempted for user '42' from 203.0.113.10: k3y-from-the-cookie", 'yii\web\User::getIdentityAndDurationFromCookie');
+        Yii::getLogger()->flush(true);
+
+        $event = $this->singleEvent();
+        $expected = "Invalid cookie auth key attempted for user '[Filtered PII]' from [Filtered PII]: [Filtered PII]";
+        $this->assertSame($expected, $event['message'] ?? null);
+        $this->assertSame($expected, $event['extra']['real_body'] ?? null);
+    }
+
+    public function testYiisWarningAboutAnInvalidAuthKeyIsScrubbedWithTheOtherLogLinesToo(): void
+    {
+        $this->appWithLogTarget();
+
+        Yii::warning("Invalid session auth key attempted for user '42' from 2001:db8::1: k3y-from-the-session", 'yii\web\User::renewAuthStatus');
+        Yii::error('a later problem', 'app');
+        Yii::getLogger()->flush(true);
+
+        $event = $this->singleEvent();
+        $this->assertSame('a later problem', $event['message'] ?? null);
+        $logs = implode("\n", (array)($event['extra']['logs'] ?? []));
+        $this->assertStringContainsString("Invalid session auth key attempted for user '[Filtered PII]' from [Filtered PII]: [Filtered PII]", $logs);
+        $this->assertStringNotContainsString('k3y-from-the-session', $logs);
+        $this->assertStringNotContainsString('2001:db8::1', $logs);
+    }
+
+    public function testWithSendingPiiEnabledTheAuthKeyIsStillLeftOut(): void
+    {
+        $this->appWithLogTarget(['send_default_pii' => true]);
+
+        Yii::warning("Invalid cookie auth key attempted for user '42' from 203.0.113.10: k3y", 'yii\web\User::getIdentityAndDurationFromCookie');
+        Yii::getLogger()->flush(true);
+
+        $this->assertSame(
+            "Invalid cookie auth key attempted for user '42' from 203.0.113.10: [Filtered PII]",
+            $this->singleEvent()['message'] ?? null
+        );
+    }
+
+    public function testThePasswordInTheDsnOfAFailedConnectionIsNotSent(): void
+    {
+        $this->appWithLogTarget(['send_default_pii' => true]);
+
+        // Yii's warning about a replica, or a master, of the connection's pool that couldn't be opened.
+        Yii::warning('Connection (pgsql:host=replica;password=db-secret;dbname=app) failed: SQLSTATE[08006] [7] connection refused', 'yii\db\Connection::openFromPoolSequentially');
+        Yii::getLogger()->flush(true);
+
+        $this->assertSame(
+            'Connection (pgsql:host=replica;password=[Filtered PII];dbname=app) failed: SQLSTATE[08006] [7] connection refused',
+            $this->singleEvent()['message'] ?? null
+        );
+    }
+
+    public function testOnlyYiisOwnWarningsAreScrubbed(): void
+    {
+        $this->appWithLogTarget();
+        $line = "Invalid cookie auth key attempted for user '42' from 203.0.113.10: k3y";
+
+        Yii::warning($line, 'app');
+        Yii::getLogger()->flush(true);
+
+        $this->assertSame($line, $this->singleEvent()['message'] ?? null);
+    }
+
     public function testTheApplicationsOwnLinesAreSentAsWritten(): void
     {
         $this->appWithLogTarget();

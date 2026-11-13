@@ -185,6 +185,11 @@ With `'send_default_pii' => true` in `sentrySettings`, all headers and cookies a
 from `yii\web\Request::getUserIP()` (which honors `trustedHosts` when the application runs behind a proxy), and log
 lines keep Yii's `[ip][userId][sessionId]` prefix. `piiBodyFields` is not applied in this mode.
 
+Two warnings that Yii logs itself are sent without their secrets: the one about a login cookie or session whose auth
+key doesn't match loses the key, and the user ID and IP address too while `send_default_pii` is off; the one about a
+database connection of a pool that couldn't be opened loses the password in the DSN. Your own log messages are sent as
+you write them.
+
 ### Filtering headers and body fields
 
 Configure the package's `Integration`. As setting `integrations` replaces the default list, keep the entries you need:
