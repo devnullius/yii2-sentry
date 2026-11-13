@@ -29,6 +29,7 @@ return static function (string $scenario, string $outDir, string $run): array {
         'scriptUrl' => '/index.php',
         'baseUrl' => '',
     ];
+    $session = ['savePath' => "$outDir/sessions"];
     $errorAction = 'site/error';
     $events = [];
 
@@ -67,6 +68,11 @@ return static function (string $scenario, string $outDir, string $run): array {
             break;
         case 'data_collection':
             $sentry['sentrySettings']['data_collection'] = ['http_bodies' => []];
+            break;
+        case 'data_collection_cookies':
+            // The SDK collects the cookies itself; the advanced application template names its session cookie so.
+            $sentry['sentrySettings']['data_collection'] = ['cookies' => ['terms' => ['theme']]];
+            $session['name'] = 'advanced-frontend';
             break;
         case 'json_api':
             $request['parsers'] = ['application/json' => yii\web\JsonParser::class];
@@ -107,7 +113,7 @@ return static function (string $scenario, string $outDir, string $run): array {
         'components' => [
             'request' => $request,
             'urlManager' => ['enablePrettyUrl' => true, 'showScriptName' => false],
-            'session' => ['savePath' => "$outDir/sessions"],
+            'session' => $session,
             'user' => ['identityClass' => Identity::class, 'enableAutoLogin' => false],
             'errorHandler' => ['errorAction' => $errorAction],
             'sentry' => $sentry,

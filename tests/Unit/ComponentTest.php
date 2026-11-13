@@ -7,6 +7,7 @@ namespace devnullius\yii2\sentry\tests\Unit;
 use devnullius\yii2\sentry\Integration;
 use devnullius\yii2\sentry\tests\Support\RecordingTransport;
 use devnullius\yii2\sentry\tests\Support\TestCase;
+use Sentry\DataCollection\KeyValueCollectionBehavior;
 use Sentry\SentrySdk;
 
 use function Sentry\init;
@@ -96,6 +97,58 @@ final class ComponentTest extends TestCase
         $events = $transport->events();
         $this->assertCount(1, $events);
         $this->assertSame('GET', $events[0]['request']['method'] ?? null, 'Yii request data must still be added.');
+    }
+
+    /**
+     * The SDK collects the cookies itself under its data_collection option, leaving out those named like its own list
+     * of words ("session", "csrf", ...): Yii's cookies are added to it, by the names the application gives them.
+     *
+     * @return array<string, array{0: mixed, 1: bool}>
+     */
+    public static function dataCollectionCookieSettings(): array
+    {
+        return [
+            'no cookie setting' => [null, true],
+            'terms of its own' => [['terms' => ['theme']], true],
+            'a deny list object' => [KeyValueCollectionBehavior::denyList(['theme']), true],
+            'an allow list' => [['mode' => KeyValueCollectionBehavior::MODE_ALLOW_LIST, 'terms' => ['lang']], false],
+            'no cookies at all' => [['mode' => KeyValueCollectionBehavior::MODE_OFF], false],
+        ];
+    }
+
+    /**
+     * @dataProvider dataCollectionCookieSettings
+     *
+     * @param mixed $cookies the data_collection option's cookies setting
+     */
+    public function testWithTheDataCollectionOptionYiisCookiesAreLeftOut($cookies, bool $denied): void
+    {
+        $app = $this->createWebApp(
+            ['sentrySettings' => ['data_collection' => $cookies === null ? [] : ['cookies' => $cookies]]],
+            [],
+            ['session' => ['name' => 'advanced-frontend']]
+        );
+
+        $client = $app->get('sentry')->getHub()->getClient();
+        $this->assertNotNull($client);
+        $dataCollection = $client->getOptions()->getDataCollection();
+        $this->assertNotNull($dataCollection);
+        $behavior = $dataCollection->getCookies();
+        $terms = $behavior->getTerms();
+        if (!$denied) {
+            // As the application set it: it lists what may be collected, or nothing is.
+            $this->assertNotSame(KeyValueCollectionBehavior::MODE_DENY_LIST, $behavior->getMode());
+            $this->assertNotContains('advanced-frontend', $terms);
+
+            return;
+        }
+        $this->assertSame(KeyValueCollectionBehavior::MODE_DENY_LIST, $behavior->getMode());
+        foreach (['advanced-frontend', '_csrf', '_identity'] as $name) {
+            $this->assertContains($name, $terms);
+        }
+        if ($cookies !== null) {
+            $this->assertContains('theme', $terms, "The application's own terms are kept.");
+        }
     }
 
     public function testReplacesTheCurrentHubByDefault(): void

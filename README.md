@@ -243,6 +243,12 @@ When it is set, in `sentrySettings` or on a client reused with `useExistingHub`,
 SDK's `RequestIntegration`, which applies that policy: `stripHeaders`, `piiHeaders` and `piiBodyFields` don't apply,
 and `decodedParams` is not added. Keep `RequestIntegration` in `integrations` in that case.
 
+The SDK leaves out the cookies named like its own list of words ("session", "sid", "csrf", "identity", …), which
+misses a session cookie named, say, `advanced-frontend`, as in Yii's advanced application template. The component adds
+the names your application gives Yii's session, CSRF and identity cookies to that list (the `cookies` setting's
+`terms`), unless the setting only lets listed cookies through. On a client you set up yourself with `\Sentry\init()`,
+or with the option given as a `DataCollectionOptions` object, add them by hand.
+
 ## Console applications and queue workers
 
 Configure the component and `LogTarget` in the console application the same way; request data is skipped

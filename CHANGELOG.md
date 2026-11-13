@@ -19,6 +19,10 @@ All notable changes to this project are documented here. The format is based on
   visitor's IP address and the key, and its warning about a database connection of a pool that couldn't be opened with
   the connection's DSN, which may hold the password. The key and the password are now left out, and the user ID and IP
   address too unless `send_default_pii` is enabled.
+- With the SDK's `data_collection` option, the SDK collects the cookies itself, leaving out the ones named like its own
+  list of words, so a session cookie under another name, like `advanced-frontend` in Yii's advanced application
+  template, was sent. The names the application gives Yii's session, CSRF and identity cookies are now added to that
+  list.
 
 ## [4.1.0] - 2026-11-10
 
