@@ -86,7 +86,9 @@ class Component extends \yii\base\Component implements BootstrapInterface
      * - `requests`: a transaction for every web request, named by its route, with its HTTP status, timed from when
      *   PHP received the request.
      * - `commands`: a transaction for every console command, except yii2-queue workers (`queue/listen`,
-     *   `queue/run`): they run for as long as they wait for jobs, so their jobs are traced one by one instead.
+     *   `queue/run`): they run for as long as they wait for jobs, so their jobs are traced one by one instead. It is
+     *   marked as failed when the command's exit code isn't 0, or can't be known: when it ends with `exit()`,
+     *   `Yii::$app->end()` or an `ExitException` instead of returning the exit code from its action.
      * - `actions`: a span for every controller action.
      * - `views`: a span for every view rendered.
      * - `httpClient`: a span and a breadcrumb for every call made with yii2-httpclient, and the trace headers the

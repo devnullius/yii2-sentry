@@ -88,6 +88,10 @@ final class Tracer
      */
     private $transaction;
     /**
+     * @var int|false|null the process the transaction started in: a process it forks doesn't finish it
+     */
+    private $pid;
+    /**
      * @var object|null the queue job the transaction traces, when it is the job's own
      */
     private $job;
@@ -189,8 +193,9 @@ final class Tracer
             $context->setSource(TransactionSource::task());
             $this->startTransaction($context);
 
-            $this->listen(ConsoleApplication::class, Application::EVENT_AFTER_REQUEST, function () use ($app): void {
-                $this->finish(null, (int)$app->getResponse()->exitStatus !== 0);
+            $result = new CommandResult($app, $this->listen);
+            $this->listen(ConsoleApplication::class, Application::EVENT_AFTER_REQUEST, function () use ($result): void {
+                $this->finish(null, $result->failed());
             });
         }
 
@@ -251,7 +256,8 @@ final class Tracer
     public function finish(?int $httpStatus = null, bool $failed = false): void
     {
         $transaction = $this->transaction;
-        if ($transaction === null || $this->finished) {
+        // A process the request or command forked, e.g. to do part of its work, doesn't finish it.
+        if ($transaction === null || $this->finished || $this->pid !== getmypid()) {
             return;
         }
         $this->finished = true;
@@ -287,8 +293,10 @@ final class Tracer
      */
     public function end(): void
     {
-        if ($this->job !== null) {
-            // The job never returned, e.g. it called exit().
+        $transaction = $this->transaction;
+        if ($this->job !== null || ($transaction !== null && $transaction->getOp() === 'console.command')) {
+            // The job or command never returned: it crashed, or ended its process itself, e.g. with exit(), so that
+            // its exit code can't be known.
             $this->finish(null, true);
 
             return;
@@ -308,6 +316,7 @@ final class Tracer
         $context->setStartTimestamp(is_numeric($start) ? (float)$start : microtime(true));
 
         $this->transaction = $this->hub->startTransaction($context);
+        $this->pid = getmypid();
         $this->hub->setSpan($this->transaction);
         $this->registerShutdown();
     }
@@ -366,6 +375,7 @@ final class Tracer
         $this->spanBeforeJob = $spanBefore;
         $this->named = true;
         $this->transaction = $this->hub->startTransaction($context);
+        $this->pid = getmypid();
         $this->hub->setSpan($this->transaction);
         $this->registerShutdown();
     }
@@ -435,6 +445,7 @@ final class Tracer
     private function reset(): void
     {
         $this->transaction = null;
+        $this->pid = null;
         $this->job = null;
         $this->spanBeforeJob = null;
         $this->named = false;

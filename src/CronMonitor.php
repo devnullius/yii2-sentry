@@ -16,7 +16,6 @@ use yii\base\Application;
 use yii\base\Controller;
 use yii\base\InvalidConfigException;
 use yii\console\Application as ConsoleApplication;
-use yii\console\Response;
 
 /**
  * Reports the runs of the console commands listed in [[Component::$cronMonitors]] to Sentry Crons: a check-in when a
@@ -56,8 +55,8 @@ final class CronMonitor
      */
     private $listen;
     /**
-     * @var array{slug: string, config: MonitorConfig|null, start: float, pid: int|false, id: string|null, response: Response|null}|null
-     * the run being reported: the process that runs it, and the response its action returned, if any
+     * @var array{slug: string, config: MonitorConfig|null, start: float, pid: int|false, id: string|null}|null the run
+     * being reported, and the process that runs it
      */
     private $run;
     /**
@@ -127,21 +126,13 @@ final class CronMonitor
      */
     public function start(ConsoleApplication $app): void
     {
+        $result = new CommandResult($app, $this->listen);
+
         ($this->listen)(Controller::class, Controller::EVENT_BEFORE_ACTION, function (ActionEvent $event) use ($app): void {
             $this->beforeAction($event->action, $app);
         });
-        ($this->listen)(Controller::class, Controller::EVENT_AFTER_ACTION, function (ActionEvent $event) use ($app): void {
-            // The command then ends with the exit code of this response, not the application's.
-            if ($this->run !== null && $event->action === $app->requestedAction && $event->result instanceof Response) {
-                $this->run['response'] = $event->result;
-            }
-        });
-        ($this->listen)(ConsoleApplication::class, Application::EVENT_AFTER_REQUEST, function () use ($app): void {
-            $response = $this->run['response'] ?? $app->getResponse();
-            // Application::end() runs this event before the exit code it was given is known, e.g. one the command
-            // passed to Yii::$app->end() or an ExitException.
-            $failed = self::isApplicationEnding() || (int)$response->exitStatus !== 0;
-            $this->finish($failed ? CheckInStatus::error() : CheckInStatus::ok());
+        ($this->listen)(ConsoleApplication::class, Application::EVENT_AFTER_REQUEST, function () use ($result): void {
+            $this->finish($result->failed() ? CheckInStatus::error() : CheckInStatus::ok());
         });
     }
 
@@ -174,7 +165,6 @@ final class CronMonitor
             'start' => microtime(true),
             'pid' => getmypid(),
             'id' => null,
-            'response' => null,
         ];
         $this->registerShutdown();
         $this->run['id'] = $this->hub->captureCheckIn($slug, CheckInStatus::inProgress(), null, $config);
@@ -223,21 +213,6 @@ final class CronMonitor
                 Yii::warning('Unable to report the end of the command to Sentry Crons: ' . $exception, self::class);
             }
         });
-    }
-
-    /**
-     * Whether Application::end() is ending the command: called by the command itself, or by Application::run() for an
-     * ExitException.
-     */
-    private static function isApplicationEnding(): bool
-    {
-        foreach (debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS) as $frame) {
-            if ($frame['function'] === 'end' && isset($frame['class']) && is_a($frame['class'], Application::class, true)) {
-                return true;
-            }
-        }
-
-        return false;
     }
 
     /**

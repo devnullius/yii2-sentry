@@ -226,6 +226,16 @@ final class TracingTest extends TestCase
         $this->assertSame('internal_error', $this->transactions()[0]['contexts']['trace']['status'] ?? null);
     }
 
+    public function testAConsoleCommandIsMarkedByTheExitCodeOfTheResponseItReturns(): void
+    {
+        $app = $this->createConsoleApp(['sentrySettings' => ['traces_sample_rate' => 1.0]]);
+        $_SERVER['argv'] = ['yii', 'hello/respond'];
+
+        $app->run();
+
+        $this->assertSame('internal_error', $this->transactions()[0]['contexts']['trace']['status'] ?? null);
+    }
+
     public function testCommandTracingCanBeTurnedOff(): void
     {
         $app = $this->createConsoleApp(['sentrySettings' => ['traces_sample_rate' => 1.0], 'tracing' => ['commands' => false]]);
