@@ -539,9 +539,10 @@ class Integration implements IntegrationInterface
             return explode("\n", $text, 2)[0];
         }
 
-        if ($category === 'yii\\db\\Connection::open' && $this->scrubSecrets) {
-            // E.g. "Opening DB connection: pgsql:host=db;dbname=app;password=secret"
-            return $replace('/((?:^|[;:])\s*(?:password|pwd)\s*=)[^;]*/i', static function (array $match) use ($replacement): string {
+        if (strpos($category, 'yii\\db\\Connection::') === 0 && $this->scrubSecrets) {
+            // E.g. "Opening DB connection: pgsql:host=db;dbname=app;password=secret", and the warning about a
+            // connection of a pool that failed: "Connection (pgsql:host=replica;password=secret) failed: ..."
+            return $replace('/((?:^|[;:])\s*(?:password|pwd)\s*=).*?(?=;|\) failed: |$)/i', static function (array $match) use ($replacement): string {
                 return $match[1] . $replacement;
             }, $text);
         }

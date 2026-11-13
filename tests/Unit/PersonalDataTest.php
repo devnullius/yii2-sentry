@@ -389,6 +389,17 @@ final class PersonalDataTest extends TestCase
                 'Opening DB connection: pgsql:host=db;dbname=app;password=db-secret',
                 'Opening DB connection: pgsql:host=db;dbname=app;password=[Filtered PII]',
             ],
+            // A warning, so an event too: a replica, or a master, of the connection's pool that couldn't be opened.
+            'failed connection of a pool' => [
+                'yii\db\Connection::openFromPoolSequentially',
+                'Connection (pgsql:host=replica;password=db-secret;dbname=app) failed: SQLSTATE[08006] [7] connection refused',
+                'Connection (pgsql:host=replica;password=[Filtered PII];dbname=app) failed: SQLSTATE[08006] [7] connection refused',
+            ],
+            'failed connection of a pool, the password last' => [
+                'yii\db\Connection::openFromPoolSequentially',
+                'Connection (pgsql:host=replica;password=db-secret) failed: SQLSTATE[08006] [7] connection refused',
+                'Connection (pgsql:host=replica;password=[Filtered PII]) failed: SQLSTATE[08006] [7] connection refused',
+            ],
             // yii2-queue's LogBehavior: the exception and its stack trace, here of a job a worker ran in a process of
             // its own, with everything that process printed.
             'failed queue job' => [
