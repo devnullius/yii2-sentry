@@ -4,6 +4,115 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [5.0.0] - Unreleased
+
+5.0 changes how errors and log messages become Sentry events, keeps secrets and personal data out of events by
+default, and adds tracing, yii2-queue jobs, cron monitoring and Sentry Logs. [UPGRADE-5.0.md](UPGRADE-5.0.md) lists what
+to check when upgrading. The requirements are those of 4.1, with Sentry PHP SDK 4.33.2 or later.
+
+### Security
+
+- Secrets are scrubbed even when `send_default_pii` is on: the values of fields, query parameters, headers, cookies
+  and function arguments named like passwords, tokens, API keys or card numbers (`Integration::SECRET_FIELDS`), and
+  Yii's session, CSRF and identity cookies, under the names the application gives them. Before, `send_default_pii`
+  sent all of them, and without it request bodies were only filtered for the routes listed in `piiBodyFields`.
+- Personal data (email, phone, first, last and full names, address, birth date, IBAN, passport, national ID, IP
+  address) is hidden while `send_default_pii` is off: in the request body at any depth, the query string, headers, the
+  query string of the `Referer` header, function arguments, and job data.
+- The arguments of the functions in stack traces are scrubbed with the same rules.
+- Values in database error messages are masked, e.g. "Duplicate entry ? for key 'email'", in events, breadcrumbs and
+  Sentry Logs.
+- Multipart form bodies are no longer left to the SDK, which sent their fields unfiltered (4.1.1 applies
+  `piiBodyFields` to them).
+- Yii's own log lines are scrubbed wherever they are sent, as events, breadcrumbs, Sentry Logs and in `aggregate` mode:
+  a yii2-httpclient call keeps its method and URL (Yii logs every header and the body); logins, logouts and emails lose
+  the user ID, IP address and recipients while personal data is hidden; the warnings about an invalid login cookie or
+  session lose the auth key, and the user ID and IP address while personal data is hidden; passwords in database DSNs
+  are removed. SQL log lines are masked wherever they are sent too.
+- yii2-queue's log line about a failed job is sent without the job's data it may hold: what the job's process printed
+  and the dump of a job that couldn't be read (also fixed in 4.1.1).
+- In `aggregate` mode, the session ID in Yii's log prefix is replaced, as the session cookie is, and the prefix is left
+  out while the `privacy` setting `scrubPersonalData` hides personal data. An exception under `logs` is its class and
+  message, without the arguments in its stack trace.
+- When the SDK's `data_collection` option is set, its `user_info` decides, like it does for the SDK, whether the user ID
+  and personal data are sent. The SDK then collects the cookies itself: the names the application gives Yii's session,
+  CSRF and identity cookies are added to the cookies it leaves out, which missed a session cookie named, say,
+  `advanced-frontend`.
+- Requires Sentry PHP SDK 4.33.2 or later: 4.33.0 and 4.33.1 add the raw request body, passwords included, to the
+  transactions of traced requests.
+
+### Added
+
+- Tracing, once the SDK's `traces_sample_rate` or `traces_sampler` is set: a transaction for every web request, named
+  by its route, timed from when PHP received the request and finished after the response is sent, with its HTTP
+  status, and for every console command; spans for bootstrap, actions, views, yii2-httpclient calls and SQL queries
+  (with values masked). The new `tracing` setting turns each part off.
+- Traces continue across services: incoming `sentry-trace` and `baggage` headers are continued, and yii2-httpclient
+  calls carry them (to the hosts in the SDK's `trace_propagation_targets`, or all), also without tracing.
+  `traceMetaTags()` lets Sentry's browser SDK continue the request's trace.
+- A breadcrumb for every yii2-httpclient call, with its status code, also for calls that got no response.
+- yii2-queue jobs, when yii2-queue is installed, configured with the new `queue` setting. A failed job is an error event
+  with its exception, named after the job's class, with its ID, attempt and queue, whether it will be retried (the
+  `job.retry` tag) and its public properties, scrubbed. Each job a worker runs has a scope of its own, and queuing a
+  job is a breadcrumb. With tracing, each job a worker runs is a `queue.process` transaction, and queuing a job a
+  `queue.publish` span. A job that implements `TraceableJobInterface` (with `TraceableJobTrait`) shows in the trace of
+  the code that queued it.
+- Cron monitoring with Sentry Crons, for the console commands listed in the new `cronMonitors` setting.
+- Sentry Logs: `LogTarget::$sentryLogs` forwards log messages to Sentry's Logs product.
+- `LogTarget` settings: `aggregate`, `breadcrumbs`, `breadcrumbLevels`, `maskSqlValues`, `categoryAsLogger`,
+  `stackTraces`, `sentryLogs` and `sentryLogLevels`.
+- Component settings: `privacy` (this package's `Integration`, configured without replacing the integration list),
+  `tracing`, `queue`, `cronMonitors`, `sendUserId`, `yiiContext`, `routeAsTransaction` and `sendAfterResponse`.
+- `privacy` settings: `scrubSecrets`, `secretFields`, `scrubPersonalData`, `personalFields`, `sendUnparsedBodies`,
+  `maskDatabaseErrors` and `scrubYiiLogs`, besides the `Integration` settings of 4.x (`piiBodyFields`, `piiHeaders`,
+  `stripHeaders`, `httpMethodsWithRequestBody`, `piiReplaceText`).
+- A "yii" section on events: the Yii version and the application's ID and name.
+- The `yiisoft/yii2-queue` and `ext-excimer` suggestions. With excimer, the SDK's profiling (`profiles_sample_rate`, or
+  continuous profiling from SDK 4.36) profiles the transactions above.
+- End-to-end tests that run queue workers and console commands in real processes, and a CI job that runs the tests with
+  the `excimer` extension.
+
+### Changed
+
+- `LogTarget` sends one event for every error and warning, with the time it was logged, the log category as its logger
+  and a stack trace from where it was logged (with Yii's `traceLevel`). The request's other log messages become
+  breadcrumbs, SQL queries as `db.sql.query` breadcrumbs with their values masked. `levels` defaults to `error` and
+  `warning`. `'aggregate' => true` keeps the version 4 behavior: one event per export.
+- An exception that reaches Yii's error handler is marked as unhandled.
+- PHP errors are reported through Yii's error handler only: `ErrorListenerIntegration`, `FatalErrorListenerIntegration`
+  and `TransactionIntegration` are no longer in the default `integrations`, so PHP errors are no longer reported twice.
+- A Sentry client set up before Yii, e.g. with `\Sentry\init()`, is reused by default: `useExistingHub` is `true`.
+- The user ID is attached to the events of a logged-in user on every request, not only when the user logs in, but by
+  default only while personal data may be sent: with `send_default_pii`, or the `data_collection` option's
+  `user_info`. Before, it was attached at login whatever `send_default_pii` said. The new `sendUserId` setting attaches
+  it without the other personal data.
+- The requested route is the transaction of error events.
+- Only the application's own code is marked as "in app" in stack traces, and file paths are shown relative to the
+  project root: `appBasePath` defaults to it, where it was `@app`. Sentry may group some issues anew once.
+- The request body is sent once, as its fields, in `request.data`; the `decodedParams` additional data is gone. JSON
+  bodies are read as fields also without a Yii parser configured for them, and bodies that can't be read as fields
+  (XML, text, invalid JSON) are left out unless `sendUnparsedBodies` is set.
+- `piiBodyFields` names match at any depth of the body, like `personalFields`; a name with a list limits the match to
+  the fields under it.
+- `piiHeaders` holds the headers with the visitor's IP address (`Forwarded`, `X-Forwarded-For`, `X-Real-IP`):
+  `Authorization` and `Proxy-Authorization` are secrets now, scrubbed even with `send_default_pii`.
+- The HTTP response is finished before events are sent, under PHP-FPM and LiteSpeed (`sendAfterResponse`).
+- The `yiisoft/yii2-httpclient` suggestion now describes what the package does with it.
+- The README was rewritten.
+
+### Removed
+
+- Version 4's tracing: a transaction per action, and yii2-httpclient requests as transactions of their own.
+- The `decodedParams` additional data, and, outside `aggregate` mode, the `logs`, `real_body`, `real_time` and `traces`
+  additional data: the other messages are breadcrumbs, and the body is in `request.data`.
+
+### Fixed
+
+- A failed yii2-queue job was lost, or, with `LogBehavior`, reported as the text of its log line, with the log lines of
+  the other jobs under `logs`.
+- Building several applications in one process, as some test suites do, registered the component's event handlers
+  again for each application, so that actions were recorded several times.
+
 ## [4.1.0] - 2026-11-10
 
 ### Security
@@ -92,6 +201,7 @@ All notable changes to this project are documented here. The format is based on
 
 [#1]: https://github.com/devnullius/yii2-sentry/issues/1
 [#2]: https://github.com/devnullius/yii2-sentry/pull/2
+[5.0.0]: https://github.com/devnullius/yii2-sentry/compare/4.1.0...5.0.0
 [4.1.0]: https://github.com/devnullius/yii2-sentry/compare/4.0.1...4.1.0
 [4.0.1]: https://github.com/devnullius/yii2-sentry/compare/4.0.0...4.0.1
 [4.0.0]: https://github.com/devnullius/yii2-sentry/compare/1.9.3...4.0.0

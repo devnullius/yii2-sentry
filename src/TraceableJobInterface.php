@@ -20,8 +20,9 @@ namespace devnullius\yii2\sentry;
  * Jobs are reported and traced either way; this only links them to where they were queued.
  *
  * The trait adds a property to the job as it is stored: deploy the workers before, or together with, the code that
- * queues the job. A worker still running the class without the property can't read the job (yii2-queue's
- * JsonSerializer always, its PhpSerializer when deprecations are reported), and yii2-queue drops a job it can't read.
+ * queues the job. A worker still running the class without the property can't read the job: with yii2-queue's
+ * JsonSerializer when the job extends BaseObject, and otherwise on PHP 8.2 and later when deprecations are reported.
+ * yii2-queue drops a job it can't read.
  */
 interface TraceableJobInterface
 {
