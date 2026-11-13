@@ -265,6 +265,46 @@ final class LogTargetTest extends TestCase
         $this->assertStringContainsString('first problem', implode("\n", (array)($event['extra']['logs'] ?? [])));
     }
 
+    public function testSqlQueriesThatBecomeEventsAreMasked(): void
+    {
+        $this->appWithLogTarget(['levels' => ['error', 'warning', 'info']]);
+
+        Yii::info("SELECT * FROM `user` WHERE `email`='ann@example.com'", 'yii\db\Command::query');
+        Yii::getLogger()->flush(true);
+
+        $messages = array_column($this->eventsOf('yii\db\Command::query'), 'message');
+        $this->assertSame(['SELECT * FROM `user` WHERE `email`=?'], $messages);
+    }
+
+    public function testAggregatedLogLinesAreScrubbedLikeBreadcrumbs(): void
+    {
+        $this->appWithLogTarget(['aggregate' => true]);
+
+        Yii::warning("Invalid cookie auth key attempted for user '42' from 203.0.113.10: k3y", 'yii\web\User::getIdentityAndDurationFromCookie');
+        Yii::warning(new RuntimeException('Payment declined'), 'app');
+        Yii::error('a later problem', 'app');
+        Yii::getLogger()->flush(true);
+
+        $logs = implode("\n", (array)($this->singleEvent()['extra']['logs'] ?? []));
+        $this->assertStringContainsString("Invalid cookie auth key attempted for user '[Filtered PII]' from [Filtered PII]: [Filtered PII]", $logs);
+        // An exception's class and message, without its stack trace and the arguments in it.
+        $this->assertStringContainsString('RuntimeException: Payment declined', $logs);
+        $this->assertStringNotContainsString('Stack trace', $logs);
+    }
+
+    public function testTheAggregatedMessageIsScrubbedLikeBreadcrumbs(): void
+    {
+        $this->appWithLogTarget(['aggregate' => true]);
+
+        Yii::warning("Invalid session auth key attempted for user '42' from 203.0.113.10: k3y", 'yii\web\User::renewAuthStatus');
+        Yii::getLogger()->flush(true);
+
+        $event = $this->singleEvent();
+        $scrubbed = "Invalid session auth key attempted for user '[Filtered PII]' from [Filtered PII]: [Filtered PII]";
+        $this->assertSame($scrubbed, $event['message'] ?? null);
+        $this->assertSame($scrubbed, $event['extra']['real_body'] ?? null);
+    }
+
     public function testAggregatedLogLinesDoNotContainTheClientIpUserIdOrSessionIdByDefault(): void
     {
         $this->appForPrefixTests();
@@ -294,6 +334,16 @@ final class LogTargetTest extends TestCase
         $logs = $this->exportTwoMessagesAggregated();
 
         $this->assertStringContainsString('[203.0.113.10][42][' . ActiveSession::ID . ']', $logs);
+    }
+
+    public function testTheAggregatedPrefixIsLeftOutWhileThePrivacySettingHidesPersonalData(): void
+    {
+        $this->appForPrefixTests(['send_default_pii' => true], [], ['scrubPersonalData' => true]);
+
+        $logs = $this->exportTwoMessagesAggregated();
+
+        $this->assertStringNotContainsString('203.0.113.10', $logs);
+        $this->assertStringNotContainsString('[42]', $logs);
     }
 
     public function testWithoutASessionTheAggregatedPrefixSaysSoAsYiiDoes(): void
@@ -392,6 +442,16 @@ final class LogTargetTest extends TestCase
         Yii::getLogger()->flush(true);
 
         return implode("\n", (array)($this->singleEvent()['extra']['logs'] ?? []));
+    }
+
+    /**
+     * @return list<array<string, mixed>> the events of messages logged in the category
+     */
+    private function eventsOf(string $category): array
+    {
+        return array_values(array_filter($this->transport->events(), static function (array $event) use ($category): bool {
+            return ($event['logger'] ?? null) === $category;
+        }));
     }
 
     private function logAnError(): void

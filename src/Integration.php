@@ -123,11 +123,13 @@ class Integration implements IntegrationInterface
      */
     public $maskDatabaseErrors = true;
     /**
-     * @var bool Scrub the log lines Yii itself writes, which become breadcrumbs and Sentry Logs: outgoing HTTP calls
-     * keep only their method and URL (Yii logs every header and the body); logins and logouts lose the user ID and
-     * IP address, and emails their recipients, while personal data is hidden; a password in the DSN of a database
-     * connection is always scrubbed; yii2-queue's line about a failed job keeps only its first line, without the
-     * stack trace or what the job's process printed. Your application's own log lines are sent as they are written.
+     * @var bool Scrub the log lines Yii itself writes, wherever they are sent: as events, breadcrumbs, Sentry Logs,
+     * and the lines of LogTarget's `aggregate` mode. Outgoing HTTP calls keep only their method and URL (Yii logs every
+     * header and the body); logins and logouts lose the user ID and IP address, and emails their recipients, while
+     * personal data is hidden; the warnings about an invalid auth key always lose the key, and the user ID and IP
+     * address while personal data is hidden; a password in the DSN of a database connection is always scrubbed;
+     * yii2-queue's line about a failed job keeps only its first line, without the stack trace. Your application's own
+     * log lines are sent as they are written.
      */
     public $scrubYiiLogs = true;
     /**
@@ -497,6 +499,19 @@ class Integration implements IntegrationInterface
     }
 
     /**
+     * The names of Yii's cookies that hold secrets, as the application configures them, while [[scrubSecrets]] is on:
+     * for the SDK to leave out under its `data_collection` option, which leaves the cookies to the SDK.
+     *
+     * @return string[]
+     *
+     * @internal
+     */
+    public function secretCookieNames(): array
+    {
+        return $this->scrubSecrets ? self::yiiSecretNames() : [];
+    }
+
+    /**
      * Removes secrets and personal data from a line Yii itself logged, see [[scrubYiiLogs]].
      *
      * @internal
@@ -520,8 +535,8 @@ class Integration implements IntegrationInterface
 
         if ($category === 'yii\\queue\\Queue') {
             // yii2-queue's LogBehavior: the job and the exception it failed with; then the stack trace, with
-            // arguments, and the job's data the exception may hold.
-            return explode("\n", FailedJobText::withoutJobData($text), 2)[0];
+            // arguments. LogTarget has taken out the job's data the line may hold already.
+            return explode("\n", $text, 2)[0];
         }
 
         if ($category === 'yii\\db\\Connection::open' && $this->scrubSecrets) {
@@ -529,6 +544,23 @@ class Integration implements IntegrationInterface
             return $replace('/((?:^|[;:])\s*(?:password|pwd)\s*=)[^;]*/i', static function (array $match) use ($replacement): string {
                 return $match[1] . $replacement;
             }, $text);
+        }
+
+        if (strpos($category, 'yii\\web\\User::') === 0 && strpos($text, 'auth key attempted for user') !== false) {
+            // E.g. "Invalid cookie auth key attempted for user '42' from 203.0.113.10: <the key>": a warning, so an
+            // event too. The key is a secret; the user ID and IP address are personal data.
+            $hidesPersonalData = $this->hidesPersonalData($options);
+            $scrubSecrets = $this->scrubSecrets;
+
+            return $replace(
+                "/^(Invalid (?:cookie|session) auth key attempted for user ')(.*?)(' from )(\\S*)(: )(.*)$/s",
+                static function (array $match) use ($replacement, $hidesPersonalData, $scrubSecrets): string {
+                    return $match[1] . ($hidesPersonalData ? $replacement : $match[2]) . $match[3]
+                        . ($hidesPersonalData ? $replacement : $match[4]) . $match[5]
+                        . ($scrubSecrets ? $replacement : $match[6]);
+                },
+                $text
+            );
         }
 
         // Yii logs a line for every SQL query: build nothing for the many lines left as they are.

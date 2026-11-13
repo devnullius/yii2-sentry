@@ -74,8 +74,9 @@ class LogTarget extends Target
      */
     public $breadcrumbLevels = ['error', 'warning', 'info', 'trace'];
     /**
-     * Replace the values in SQL log lines (strings and numbers) and in database errors with "?" in breadcrumbs and
-     * Sentry Logs. Error events mask database errors with the component's `privacy` setting `maskDatabaseErrors`.
+     * Replace the values in SQL log lines (strings and numbers) and in database errors with "?" wherever the lines are
+     * sent: as events, breadcrumbs, Sentry Logs, and the lines of `aggregate` mode. The events of database errors
+     * themselves are masked with the component's `privacy` setting `maskDatabaseErrors`.
      *
      * @var bool
      */
@@ -154,9 +155,10 @@ class LogTarget extends Target
 
     /**
      * Yii's default prefix: the client IP, user ID and session ID. It is only kept when the SDK may send personal
-     * data: with `send_default_pii`, or, when the SDK's `data_collection` option is set, with its `user_info`. Even
-     * then, the session ID is replaced: it is a credential, a secret like Yii's session cookie (see the component's
-     * `privacy` setting `scrubSecrets`). A custom [[prefix]] is used as is.
+     * data: with `send_default_pii`, or, when the SDK's `data_collection` option is set, with its `user_info`; and not
+     * while the component's `privacy` setting `scrubPersonalData` hides it. Even then, the session ID is replaced: it
+     * is a credential, a secret like Yii's session cookie (see the `privacy` setting `scrubSecrets`). A custom
+     * [[prefix]] is used as is.
      *
      * {@inheritdoc}
      */
@@ -167,7 +169,11 @@ class LogTarget extends Target
         }
 
         $app = Yii::$app;
-        if ($app === null || !DataCollectionPolicy::fromHub($this->component->getHub())->shouldCollectUserInfo()) {
+        if (
+            $app === null
+            || !DataCollectionPolicy::fromHub($this->component->getHub())->shouldCollectUserInfo()
+            || $this->component->hidesPersonalData()
+        ) {
             return '';
         }
 
@@ -312,12 +318,7 @@ class LogTarget extends Target
             return;
         }
 
-        $text = is_string($body) ? $body : VarDumper::export($body);
-        if ($category === self::QUEUE_CATEGORY) {
-            // LogBehavior's line about a failed job, when the component doesn't report the job itself.
-            $text = FailedJobText::withoutJobData($text);
-        }
-        $event->setMessage($text);
+        $event->setMessage($this->messageText($body, (string)$category));
 
         $traces = $message[4] ?? [];
         if ($this->stackTraces && is_array($traces) && $traces !== []) {
@@ -464,12 +465,14 @@ class LogTarget extends Target
                 continue;
             }
 
-            $logs[] = $this->formatMessage(self::withoutJobData($message));
+            // Scrubbed like breadcrumbs; an exception as its class and message, without the arguments in its trace.
+            $message[0] = $this->messageText($message[0], (string)$message[2]);
+            $logs[] = $this->formatMessage($message);
         }
 
         // Configure scope and capture error
         $hub->withScope(function (Scope $scope) use ($hub, $primaryMessage, $logs) {
-            [$body, $level, $category, $timestamp] = self::withoutJobData($primaryMessage);
+            [$body, $level, $category, $timestamp] = $primaryMessage;
 
             if (!empty($category)) {
                 $scope->setTag('category', $category);
@@ -480,7 +483,8 @@ class LogTarget extends Target
             if ($body instanceof Throwable) {
                 $hub->captureException($body);
             } else {
-                $scope->setExtra('real_body', $body);
+                $text = $this->messageText($body, (string)$category);
+                $scope->setExtra('real_body', $text);
                 $scope->setExtra('real_time', $this->getTime($timestamp));
 
                 if (isset($primaryMessage[4])) {
@@ -495,32 +499,14 @@ class LogTarget extends Target
                     $scope->setExtra('traces', 'N/A');
                 }
 
-                if (is_string($body)) {
-                    $text = $body;
-                } else {
-                    $text = VarDumper::export($body);
-                }
-
                 $hub->captureMessage($text, $this->getSeverityLevel($level));
             }
         });
     }
 
     /**
-     * @param array<int, mixed> $message
+     * The text of a message, as it is sent: as an event, a breadcrumb, to Sentry Logs, or in aggregate mode.
      *
-     * @return array<int, mixed> the message; LogBehavior's line about a failed job without the job's data it may hold
-     */
-    private static function withoutJobData(array $message): array
-    {
-        if (($message[2] ?? null) === self::QUEUE_CATEGORY && is_string($message[0] ?? null)) {
-            $message[0] = FailedJobText::withoutJobData($message[0]);
-        }
-
-        return $message;
-    }
-
-    /**
      * @param mixed $body
      */
     private function messageText($body, string $category): string
@@ -535,6 +521,10 @@ class LogTarget extends Target
         }
 
         $text = is_string($body) ? $body : VarDumper::export($body);
+        if ($category === self::QUEUE_CATEGORY) {
+            // LogBehavior's line about a failed job, without the job's data it may hold, whatever the settings.
+            $text = FailedJobText::withoutJobData($text);
+        }
         if ($this->maskSqlValues && self::isSqlCategory($category)) {
             $text = SqlMasker::mask($text);
         }

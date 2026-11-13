@@ -9,6 +9,7 @@ use Sentry\Breadcrumb;
 use Sentry\ClientBuilder;
 use Sentry\ClientInterface;
 use Sentry\DataCollection\DataCollectionPolicy;
+use Sentry\DataCollection\KeyValueCollectionBehavior;
 use Sentry\Event as SentryEvent;
 use Sentry\Integration\EnvironmentIntegration;
 use Sentry\Integration\FrameContextifierIntegration;
@@ -278,8 +279,17 @@ class Component extends \yii\base\Component implements BootstrapInterface
                 $defaults['environment'] = YII_ENV;
             }
 
-            $options = new Options(array_merge($defaults, $this->sentrySettings));
-            $options->setIntegrations($this->createIntegrations());
+            $integrations = $this->createIntegrations();
+            $settings = $this->sentrySettings;
+            if (isset($settings['data_collection']) && is_array($settings['data_collection']) && $this->privacyIntegration !== null) {
+                $settings['data_collection'] = self::withSecretCookiesDenied(
+                    $settings['data_collection'],
+                    $this->privacyIntegration->secretCookieNames()
+                );
+            }
+
+            $options = new Options(array_merge($defaults, $settings));
+            $options->setIntegrations($integrations);
 
             /** @var ClientBuilder $builder */
             $builder = Yii::$container->get(ClientBuilder::class, [$options]);
@@ -409,6 +419,18 @@ class Component extends \yii\base\Component implements BootstrapInterface
     }
 
     /**
+     * Whether personal data is hidden, under the [[privacy]] settings.
+     *
+     * @internal used by [[LogTarget]]
+     */
+    public function hidesPersonalData(): bool
+    {
+        $scrubber = $this->privacyScrubber();
+
+        return $scrubber !== null ? $scrubber->hidesPersonalData() : !DataCollectionPolicy::fromHub($this->hub)->shouldCollectUserInfo();
+    }
+
+    /**
      * A secret, e.g. a session ID, as it may be sent: replaced under the [[privacy]] setting `scrubSecrets`.
      *
      * @internal used by [[LogTarget]]
@@ -517,6 +539,44 @@ class Component extends \yii\base\Component implements BootstrapInterface
         }
 
         return array_map('boolval', array_merge($defaults, $settings));
+    }
+
+    /**
+     * Adds Yii's cookies that hold secrets to the cookies the SDK leaves out under its `data_collection` option: the
+     * SDK collects them itself then, leaving out the ones named like its own list of words, which a name like
+     * "advanced-frontend" for the session cookie isn't. A setting that only lets listed cookies through, or none, is
+     * kept as it is.
+     *
+     * @param array<array-key, mixed> $dataCollection
+     * @param string[] $names
+     *
+     * @return array<array-key, mixed>
+     */
+    private static function withSecretCookiesDenied(array $dataCollection, array $names): array
+    {
+        if ($names === []) {
+            return $dataCollection;
+        }
+
+        $cookies = $dataCollection['cookies'] ?? [];
+        if ($cookies instanceof KeyValueCollectionBehavior) {
+            if ($cookies->getMode() === KeyValueCollectionBehavior::MODE_DENY_LIST) {
+                $dataCollection['cookies'] = KeyValueCollectionBehavior::denyList(array_values(array_unique(array_merge($cookies->getTerms(), $names))));
+            }
+
+            return $dataCollection;
+        }
+
+        // Without a mode, the SDK takes a deny list.
+        if (is_array($cookies) && ($cookies['mode'] ?? KeyValueCollectionBehavior::MODE_DENY_LIST) === KeyValueCollectionBehavior::MODE_DENY_LIST) {
+            $terms = $cookies['terms'] ?? [];
+            if (is_array($terms)) {
+                $cookies['terms'] = array_values(array_unique(array_merge($terms, $names)));
+                $dataCollection['cookies'] = $cookies;
+            }
+        }
+
+        return $dataCollection;
     }
 
     private function privacyScrubber(): ?Scrubber

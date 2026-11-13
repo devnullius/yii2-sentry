@@ -231,6 +231,27 @@ final class WebReportingTest extends WebServerTestCase
         $this->assertStringNotContainsString('hunter2', (string)json_encode($this->singleEvent($response)));
     }
 
+    public function testWithTheDataCollectionOptionYiisSessionCookieIsLeftOutUnderTheNameTheApplicationGivesIt(): void
+    {
+        $response = $this->request('data_collection_cookies', 'GET', '/site/log-error', ['Cookie: advanced-frontend=s3ss10n-1d; theme=dark; lang=hy']);
+
+        $sent = (string)json_encode($this->singleEvent($response));
+        $this->assertStringNotContainsString('s3ss10n-1d', $sent, 'A session ID in Sentry allows session hijacking.');
+        // The application's own terms are kept, and the other cookies collected.
+        $this->assertStringNotContainsString('dark', $sent);
+        $this->assertStringContainsString('hy', (string)json_encode($this->singleEvent($response)['request']['cookies'] ?? null));
+    }
+
+    public function testATracedRequestsTransactionCarriesNoRequestBody(): void
+    {
+        $response = $this->request('tracing', 'POST', '/site/post-log', self::FORM, 'username=alice&password=hunter2');
+
+        $this->assertCount(1, $response['transactions'], $response['appLog']);
+        $transaction = $response['transactions'][0];
+        $this->assertArrayNotHasKey('data', $transaction['request'] ?? []);
+        $this->assertStringNotContainsString('hunter2', (string)json_encode($transaction));
+    }
+
     public function testTheDataCollectionPolicyOfAReusedClientIsHonored(): void
     {
         $response = $this->request('existing_hub_data_collection', 'POST', '/site/post-log', self::FORM, 'username=alice&password=hunter2');

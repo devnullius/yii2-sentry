@@ -9,6 +9,7 @@ use devnullius\yii2\sentry\LogTarget;
 use devnullius\yii2\sentry\tests\Support\TestCase;
 use PDOException;
 use RuntimeException;
+use Sentry\DataCollection\KeyValueCollectionBehavior;
 use Yii;
 use yii\base\Action;
 use yii\base\InvalidConfigException;
@@ -366,6 +367,17 @@ final class PersonalDataTest extends TestCase
             'login without session' => ['yii\web\User::login', "User '42' logged in from 203.0.113.10. Session not enabled.", "User '[Filtered PII]' logged in from [Filtered PII]. Session not enabled."],
             'login by cookie' => ['yii\web\User::loginByCookie', "User '42' logged in from 2001:db8::1 via cookie.", "User '[Filtered PII]' logged in from [Filtered PII] via cookie."],
             'logout' => ['yii\web\User::logout', "User '42' logged out from 203.0.113.10.", "User '[Filtered PII]' logged out from [Filtered PII]."],
+            // Yii logs these as warnings, so they are events too.
+            'invalid auth key in a cookie' => [
+                'yii\web\User::getIdentityAndDurationFromCookie',
+                "Invalid cookie auth key attempted for user '42' from 203.0.113.10: k3y-from-the-cookie",
+                "Invalid cookie auth key attempted for user '[Filtered PII]' from [Filtered PII]: [Filtered PII]",
+            ],
+            'invalid auth key in the session' => [
+                'yii\web\User::renewAuthStatus',
+                "Invalid session auth key attempted for user '42' from 2001:db8::1: k3y-from-the-session",
+                "Invalid session auth key attempted for user '[Filtered PII]' from [Filtered PII]: [Filtered PII]",
+            ],
             'email' => ['yii\mail\BaseMailer::send', 'Sending email "Your order" to "ann@example.com, bob@example.com"', 'Sending email "Your order" to "[Filtered PII]"'],
             'outgoing HTTP call' => [
                 'yii\httpclient\StreamTransport::send',
@@ -399,15 +411,25 @@ final class PersonalDataTest extends TestCase
         $this->assertSame([$expected], $this->breadcrumbsAfter([[$category, $line]]));
     }
 
+    /**
+     * @dataProvider yiiLogLines
+     */
+    public function testYiisOwnLogLinesAreScrubbedInEventsToo(string $category, string $line, string $expected): void
+    {
+        $this->assertSame($expected, $this->eventAfter($category, $line)['message'] ?? null);
+    }
+
     public function testWithSendDefaultPiiYiisOwnLinesKeepPersonalDataButNotSecrets(): void
     {
         $breadcrumbs = $this->breadcrumbsAfter([
             ['yii\web\User::login', "User '42' logged in from 203.0.113.10 with duration 0."],
+            ['yii\web\User::renewAuthStatus', "Invalid session auth key attempted for user '42' from 203.0.113.10: k3y"],
             ['yii\db\Connection::open', 'Opening DB connection: pgsql:host=db;password=db-secret'],
         ], ['sentrySettings' => ['send_default_pii' => true]]);
 
         $this->assertSame([
             "User '42' logged in from 203.0.113.10 with duration 0.",
+            "Invalid session auth key attempted for user '42' from 203.0.113.10: [Filtered PII]",
             'Opening DB connection: pgsql:host=db;password=[Filtered PII]',
         ], $breadcrumbs);
     }
@@ -439,11 +461,75 @@ final class PersonalDataTest extends TestCase
         $this->assertSame([$personalDataSent ? $line : "User '[Filtered PII]' logged in from [Filtered PII] with duration 0."], $breadcrumbs);
     }
 
+    /**
+     * The SDK collects the cookies itself under its data_collection option, leaving out those named like its own list
+     * of words ("session", "csrf", ...): Yii's cookies are added to it, by the names the application gives them.
+     *
+     * @return array<string, array{0: mixed, 1: bool}>
+     */
+    public static function dataCollectionCookieSettings(): array
+    {
+        return [
+            'no cookie setting' => [null, true],
+            'terms of its own' => [['terms' => ['theme']], true],
+            'a deny list object' => [KeyValueCollectionBehavior::denyList(['theme']), true],
+            'an allow list' => [['mode' => KeyValueCollectionBehavior::MODE_ALLOW_LIST, 'terms' => ['lang']], false],
+            'no cookies at all' => [['mode' => KeyValueCollectionBehavior::MODE_OFF], false],
+        ];
+    }
+
+    /**
+     * @dataProvider dataCollectionCookieSettings
+     *
+     * @param mixed $cookies the data_collection option's cookies setting
+     */
+    public function testWithTheDataCollectionOptionYiisSecretCookiesAreLeftOut($cookies, bool $denied): void
+    {
+        $app = $this->createWebApp(
+            ['sentrySettings' => ['data_collection' => $cookies === null ? [] : ['cookies' => $cookies]]],
+            [],
+            ['session' => ['name' => 'advanced-frontend']]
+        );
+
+        $behavior = $this->dataCollectionCookies($app);
+        $terms = $behavior->getTerms();
+        if (!$denied) {
+            // As the application set it: it lists what may be collected, or nothing is.
+            $this->assertNotSame(KeyValueCollectionBehavior::MODE_DENY_LIST, $behavior->getMode());
+            $this->assertNotContains('advanced-frontend', $terms);
+
+            return;
+        }
+        $this->assertSame(KeyValueCollectionBehavior::MODE_DENY_LIST, $behavior->getMode());
+        foreach (['advanced-frontend', '_csrf', '_identity'] as $name) {
+            $this->assertContains($name, $terms);
+        }
+        if ($cookies !== null) {
+            $this->assertContains('theme', $terms, "The application's own terms are kept.");
+        }
+    }
+
+    public function testWithTheDataCollectionOptionYiisCookiesAreLeftToItWhenSecretsAreSent(): void
+    {
+        $app = $this->createWebApp(['sentrySettings' => ['data_collection' => []], 'privacy' => ['scrubSecrets' => false]]);
+
+        $this->assertSame([], $this->dataCollectionCookies($app)->getTerms());
+    }
+
     public function testYiisOwnLogLinesCanBeSentAsWritten(): void
     {
         $line = "User '42' logged in from 203.0.113.10 with duration 0.";
 
         $this->assertSame([$line], $this->breadcrumbsAfter([['yii\web\User::login', $line]], ['privacy' => ['scrubYiiLogs' => false]]));
+    }
+
+    public function testYiisOwnLogLinesCanBeSentAsWrittenInEventsToo(): void
+    {
+        $line = "Invalid cookie auth key attempted for user '42' from 203.0.113.10: k3y";
+
+        $event = $this->eventAfter('yii\web\User::getIdentityAndDurationFromCookie', $line, ['privacy' => ['scrubYiiLogs' => false]]);
+
+        $this->assertSame($line, $event['message'] ?? null);
     }
 
     public function testYiisOwnLogLinesAreScrubbedInSentryLogsToo(): void
@@ -484,6 +570,37 @@ final class PersonalDataTest extends TestCase
         Yii::getLogger()->flush(true);
 
         return array_column($this->singleEvent()['breadcrumbs']['values'] ?? [], 'message');
+    }
+
+    private function dataCollectionCookies(Application $app): KeyValueCollectionBehavior
+    {
+        $client = $app->get('sentry')->getHub()->getClient();
+        $this->assertNotNull($client);
+        $dataCollection = $client->getOptions()->getDataCollection();
+        $this->assertNotNull($dataCollection);
+
+        return $dataCollection->getCookies();
+    }
+
+    /**
+     * Logs the line as a warning, which makes it an event, and returns that event.
+     *
+     * @param array<string, mixed> $sentry
+     *
+     * @return array<string, mixed>
+     */
+    private function eventAfter(string $category, string $line, array $sentry = []): array
+    {
+        $sentry['tracing'] = array_merge(['httpClient' => false], $sentry['tracing'] ?? []);
+        $sentry['queue'] = array_merge(['breadcrumbs' => false, 'errors' => false], $sentry['queue'] ?? []);
+        $this->createWebApp($sentry, [], [
+            'log' => ['targets' => ['sentry' => ['class' => LogTarget::class]]],
+        ])->getLog();
+
+        Yii::warning($line, $category);
+        Yii::getLogger()->flush(true);
+
+        return $this->singleEvent();
     }
 
     /**
