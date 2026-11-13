@@ -11,6 +11,8 @@ use Sentry\ClientInterface;
 use Sentry\DataCollection\DataCollectionPolicy;
 use Sentry\DataCollection\KeyValueCollectionBehavior;
 use Sentry\Event as SentryEvent;
+use Sentry\EventHint;
+use Sentry\Exception\FatalErrorException;
 use Sentry\Integration\EnvironmentIntegration;
 use Sentry\Integration\FrameContextifierIntegration;
 use Sentry\Integration\IntegrationInterface;
@@ -28,12 +30,15 @@ use yii\base\ActionEvent;
 use yii\base\Application;
 use yii\base\BootstrapInterface;
 use yii\base\Controller;
+use yii\base\ErrorException as YiiErrorException;
 use yii\base\Event;
 use yii\base\InlineAction;
 use yii\base\InvalidConfigException;
 use yii\console\Application as ConsoleApplication;
 use yii\helpers\Html;
 use yii\httpclient\Client;
+use yii\log\Logger;
+use yii\log\Target;
 use yii\queue\Queue;
 use yii\web\Response;
 use yii\web\User;
@@ -672,26 +677,72 @@ class Component extends \yii\base\Component implements BootstrapInterface
             : self::projectRoot(Yii::getAlias('@vendor', false));
     }
 
+    /**
+     * Whether the event is the SDK's own report of a fatal error that Yii's error handler reports too, through a log
+     * target of this component. A client set up before Yii, e.g. with `\Sentry\init()`, keeps the SDK's fatal-error
+     * listener, which reports first, before the log messages that Yii's report comes with are exported.
+     */
+    private function isReportedByYiiToo(EventHint $hint): bool
+    {
+        $exception = $hint->exception;
+        $app = Yii::$app;
+        if (
+            !$exception instanceof FatalErrorException
+            || $app === null
+            || !YII_ENABLE_ERROR_HANDLER
+            || !$app->has('errorHandler', true)
+            || !$app->has('log', true)
+        ) {
+            return false;
+        }
+
+        try {
+            // What Yii's error handler logs for the error, see ErrorHandler::handleFatalError() and logException().
+            $logged = [$exception, Logger::LEVEL_ERROR, YiiErrorException::class . ':' . $exception->getSeverity(), microtime(true)];
+            foreach ($app->getLog()->targets as $target) {
+                if (
+                    $target instanceof LogTarget
+                    && $target->component === $this
+                    && $target->getEnabled()
+                    && Target::filterMessages([$logged], $target->getLevels(), $target->categories, $target->except) !== []
+                ) {
+                    return true;
+                }
+            }
+        } catch (Throwable $failure) {
+            // Not sure that Yii reports it: keep the SDK's report.
+            Yii::warning('Unable to tell whether a log target reports the fatal error: ' . $failure, __METHOD__);
+        }
+
+        return false;
+    }
+
     private static function registerEventProcessor(): void
     {
         if (self::$processorRegistered) {
             return;
         }
 
-        Scope::addGlobalEventProcessor(static function (SentryEvent $event): SentryEvent {
-            return self::$current !== null ? self::$current->processEvent($event) : $event;
+        Scope::addGlobalEventProcessor(static function (SentryEvent $event, ?EventHint $hint = null): ?SentryEvent {
+            return self::$current !== null ? self::$current->processEvent($event, $hint) : $event;
         });
         self::$processorRegistered = true;
     }
 
     /**
      * Adds what Yii knows to an event: request data for a reused client, the route, the Yii section and the user.
+     *
+     * @return SentryEvent|null the event, or null for one that is not to be sent
      */
-    private function processEvent(SentryEvent $event): SentryEvent
+    private function processEvent(SentryEvent $event, ?EventHint $hint): ?SentryEvent
     {
         $type = (string)$event->getType();
         if (($type !== 'event' && $type !== 'transaction') || SentrySdk::getCurrentHub() !== $this->hub) {
             return $event;
+        }
+
+        if ($type === 'event' && $hint !== null && $this->isReportedByYiiToo($hint)) {
+            return null;
         }
 
         try {

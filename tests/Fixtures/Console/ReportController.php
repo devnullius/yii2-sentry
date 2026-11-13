@@ -32,6 +32,7 @@ final class ReportController extends Controller
 
     public function actionFatal(): void
     {
+        Yii::info('Building the report', 'app');
         // A compile error: PHP stops at once, running only the shutdown functions.
         eval('function yii2_sentry_report() {} function yii2_sentry_report() {}');
     }

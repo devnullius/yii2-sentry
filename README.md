@@ -555,20 +555,9 @@ is left to the SDK.
 
 Once Yii has started, its error handler takes over exceptions and PHP errors, except while it renders an error page,
 when the SDK's error listener is back and reports a PHP warning in the error page itself. The SDK's fatal-error listener
-stays active, so a fatal error after Yii has started, which is rare, is reported twice: by the SDK and by Yii's error
-handler. To report fatal errors once, leave the SDK's listener out; the fatal errors that happen before Yii starts are
-then not reported:
-
-```php
-\Sentry\init([
-    'dsn' => getenv('SENTRY_DSN') ?: null,
-    'integrations' => static function (array $integrations): array {
-        return array_values(array_filter($integrations, static function ($integration): bool {
-            return !$integration instanceof \Sentry\Integration\FatalErrorListenerIntegration;
-        }));
-    },
-]);
-```
+stays active, and reports a fatal error before Yii's error handler does. The component then drops the SDK's report, if
+the log target reports the error too: Yii's report comes with the request's log messages as breadcrumbs. The SDK reports
+the fatal errors that happen before Yii starts.
 
 Without a client set up beforehand, the component creates one as usual. Set `'useExistingHub' => false` to have it
 create its own anyway.

@@ -21,9 +21,19 @@ return static function (string $scenario, string $outFile, string $queuePath): a
         'dsn' => 'https://public@sentry.example.com/1',
         'sentrySettings' => ['transport' => new RecordingTransport($outFile)],
     ];
+    $logTarget = ['class' => LogTarget::class];
 
     switch ($scenario) {
         case 'default':
+            break;
+        case 'existing_hub':
+            // The client comes from \Sentry\init() in the yii script, with the SDK's own error listeners.
+            $sentry = ['class' => Component::class, 'useExistingHub' => true];
+            break;
+        case 'existing_hub_errors_excepted':
+            $sentry = ['class' => Component::class, 'useExistingHub' => true];
+            // A log target that doesn't report what Yii's error handler logs for a fatal error.
+            $logTarget['except'] = ['yii\base\ErrorException:*'];
             break;
         case 'tracing':
             $sentry['sentrySettings']['traces_sample_rate'] = 1.0;
@@ -45,9 +55,7 @@ return static function (string $scenario, string $outFile, string $queuePath): a
         'components' => [
             'sentry' => $sentry,
             'log' => [
-                'targets' => [
-                    ['class' => LogTarget::class],
-                ],
+                'targets' => [$logTarget],
             ],
             'queue' => [
                 'class' => Queue::class,

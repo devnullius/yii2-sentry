@@ -6,3 +6,6 @@ parameters:
         - tests/Fixtures/Jobs/TracedJob.php
     bootstrapFiles:
         - tests/phpstan-bootstrap.php
+    # Defined by each application, before Yii; the bootstrap file only gives them a value.
+    dynamicConstantNames:
+        - YII_ENABLE_ERROR_HANDLER

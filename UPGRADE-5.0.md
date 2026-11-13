@@ -101,6 +101,9 @@ the component uses it, and its own `dsn`, `sentrySettings` and SDK integrations 
 `Integration`, the route, breadcrumbs and user ID are still added. Set `'useExistingHub' => false` to have the component
 create its own client, as 4.x did by default.
 
+That client keeps the SDK's own error listeners, as in 4.x, but a fatal error is no longer reported twice: the
+component drops the SDK's report when a log target reports the error through Yii's error handler.
+
 Nor does that client get what the component gives a client of its own: the environment from `YII_ENV`, file paths
 relative to the project root, and vendor code not marked as "in app". Its events then have absolute paths and vendor
 frames marked as "in app", so Sentry may group them differently: set `environment`, `prefixes` and `in_app_exclude` in

@@ -81,6 +81,8 @@ to check when upgrading. The requirements are those of 4.1, with Sentry PHP SDK 
 - An exception that reaches Yii's error handler is marked as unhandled.
 - PHP errors are reported through Yii's error handler only: `ErrorListenerIntegration`, `FatalErrorListenerIntegration`
   and `TransactionIntegration` are no longer in the default `integrations`, so PHP errors are no longer reported twice.
+  A client set up before Yii, e.g. with `\Sentry\init()`, keeps the SDK's fatal-error listener: its report of a fatal
+  error is dropped when a log target reports the error through Yii's error handler.
 - A Sentry client set up before Yii, e.g. with `\Sentry\init()`, is reused by default: `useExistingHub` is `true`.
 - The user ID is attached to the events of a logged-in user on every request, not only when the user logs in, but by
   default only while personal data may be sent: with `send_default_pii`, or the `data_collection` option's
