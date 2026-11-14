@@ -5,10 +5,12 @@ declare(strict_types=1);
 namespace devnullius\yii2\sentry\tests\Unit;
 
 use devnullius\yii2\sentry\Integration;
+use devnullius\yii2\sentry\tests\Support\FakeHttpTransport;
 use devnullius\yii2\sentry\tests\Support\RecordingTransport;
 use devnullius\yii2\sentry\tests\Support\TestCase;
 use Sentry\DataCollection\KeyValueCollectionBehavior;
 use Sentry\SentrySdk;
+use yii\httpclient\Client;
 
 use function Sentry\init;
 
@@ -159,5 +161,48 @@ final class ComponentTest extends TestCase
         $app = $this->createWebApp();
 
         $this->assertNotSame($client, $app->get('sentry')->getHub()->getClient());
+    }
+
+    /**
+     * The client's base URL and the request's URL, then the transaction's name and operation they are traced with.
+     *
+     * @return array<string, array{0: string, 1: string, 2: string, 3: string}>
+     */
+    public static function urlsOfOutgoingRequests(): array
+    {
+        return [
+            'credentials, a query string and a fragment' => [
+                'https://shop:hunter2@api.example.com/v1', 'charges?api_key=sk_live_123#receipt',
+                'https://api.example.com/v1', 'https://api.example.com/v1/charges',
+            ],
+            'an "@" in the password' => [
+                'https://shop:hunter2@more@api.example.com/v1', 'charges',
+                'https://api.example.com/v1', 'https://api.example.com/v1/charges',
+            ],
+            'nothing to leave out' => [
+                'https://api.example.com:8443/v1', 'charges/ch_1',
+                'https://api.example.com:8443/v1', 'https://api.example.com:8443/v1/charges/ch_1',
+            ],
+        ];
+    }
+
+    /**
+     * @dataProvider urlsOfOutgoingRequests
+     */
+    public function testAnOutgoingRequestIsTracedWithoutTheSecretsItsUrlMayHold(string $baseUrl, string $url, string $name, string $op): void
+    {
+        $this->createWebApp(['sentrySettings' => ['traces_sample_rate' => 1.0]]);
+        $client = new Client(['baseUrl' => $baseUrl, 'transport' => FakeHttpTransport::class]);
+
+        $client->get($url)->send();
+
+        $transactions = RecordingTransport::onlyType($this->transport->payloads, 'transaction');
+        $this->assertCount(1, $transactions);
+        $this->assertSame($name, $transactions[0]['transaction'] ?? null);
+        $this->assertSame($op, $transactions[0]['contexts']['trace']['op'] ?? null);
+        $this->assertSame($op, $transactions[0]['spans'][0]['op'] ?? null);
+        foreach (['hunter2', 'sk_live_123', 'receipt'] as $secret) {
+            $this->assertStringNotContainsString($secret, (string)json_encode($transactions[0]));
+        }
     }
 }

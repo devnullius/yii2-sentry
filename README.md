@@ -318,7 +318,8 @@ Tracing is off unless you set a sample rate:
 
 In 4.x, tracing is basic: each controller action is recorded as a transaction, and each
 [yii2-httpclient](https://github.com/yiisoft/yii2-httpclient) request as a separate one. It will be reworked in 5.0:
-see [Known limitations](#known-limitations-in-4x).
+see [Known limitations](#known-limitations-in-4x). The URL of a yii2-httpclient request is recorded without its
+credentials, query string and fragment, which may hold secrets.
 
 ## Known limitations in 4.x
 

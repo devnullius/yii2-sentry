@@ -220,8 +220,8 @@ class Component extends \yii\base\Component implements BootstrapInterface
             $httpClientSpan = null;
             Event::on(Client::class, Client::EVENT_BEFORE_SEND, function (RequestEvent $event) use (&$httpClientTransaction, &$httpClientSpan) {
                 $transactionContext = new TransactionContext();
-                $transactionContext->setName($event->sender->baseUrl ?? 'remote.http.call');
-                $transactionContext->setOp($event->request->fullUrl ?? 'remote.http.url');
+                $transactionContext->setName(self::urlWithoutSecrets($event->sender->baseUrl ?? null) ?? 'remote.http.call');
+                $transactionContext->setOp(self::urlWithoutSecrets($event->request->fullUrl ?? null) ?? 'remote.http.url');
 
                 $httpClientTransaction = startTransaction($transactionContext);
 
@@ -230,7 +230,7 @@ class Component extends \yii\base\Component implements BootstrapInterface
 
                 // Setup the context for the expensive operation span
                 $spanContext = new SpanContext();
-                $spanContext->setOp($event->request->fullUrl ?? 'remote.http.url');
+                $spanContext->setOp(self::urlWithoutSecrets($event->request->fullUrl ?? null) ?? 'remote.http.url');
 
                 // Start the span
                 $httpClientSpan = $httpClientTransaction->startChild($spanContext);
@@ -285,6 +285,24 @@ class Component extends \yii\base\Component implements BootstrapInterface
         }
 
         return $integrations;
+    }
+
+    /**
+     * A URL as tracing records it: without the credentials, query string and fragment, which may hold secrets, e.g.
+     * "https://user:password@api.example.com/charges?api_key=..." becomes "https://api.example.com/charges".
+     *
+     * @param mixed $url
+     */
+    private static function urlWithoutSecrets($url): ?string
+    {
+        if (!is_string($url)) {
+            return null;
+        }
+
+        // The credentials end at the last "@" before the path.
+        $url = (string)preg_replace('~^((?:[a-z][a-z\d+.-]*:)?//)[^/?#]*@~i', '$1', $url);
+
+        return substr($url, 0, strcspn($url, '?#'));
     }
 
     /**

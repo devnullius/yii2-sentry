@@ -27,6 +27,9 @@ All notable changes to this project are documented here. The format is based on
   as it was, unfiltered by `piiBodyFields`: e.g. a DELETE with a body, a PUT once the list is narrowed to POST, or any
   request that a client marks as another method with Yii's `X-Http-Method-Override` header or `_method` field. Such
   bodies are now left out, as the setting says.
+- With tracing on, a yii2-httpclient request was recorded with its full URL, as the operation of its transaction and
+  span, and with the client's base URL as the transaction's name, so credentials in a URL, e.g.
+  `https://user:password@...`, a query string, e.g. `?api_key=...`, and a fragment were sent. They are now left out.
 
 ## [4.1.0] - 2026-11-10
 
