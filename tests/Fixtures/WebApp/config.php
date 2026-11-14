@@ -66,6 +66,11 @@ return static function (string $scenario, string $outDir, string $run): array {
             $sentry = ['class' => Component::class, 'useExistingHub' => true];
             $request['trustedHosts'] = ['127.0.0.1'];
             break;
+        case 'post_bodies_only':
+            $integration = new Integration();
+            $integration->httpMethodsWithRequestBody = ['POST'];
+            $sentry['integrations'] = $withIntegration($integration);
+            break;
         case 'data_collection':
             $sentry['sentrySettings']['data_collection'] = ['http_bodies' => []];
             break;

@@ -178,8 +178,10 @@ By default, the SDK's `send_default_pii` option is `false`. In that mode:
   log messages by default.
 
 **Request bodies are sent** for POST, PUT and PATCH requests, unless you filter their fields per route with
-`piiBodyFields` (below). Sentry's [server-side data scrubbing](https://docs.sentry.io/security-legal-pii/scrubbing/)
-can mask more, but don't rely on it alone for passwords and payment data.
+`piiBodyFields` (below). The bodies of other methods, e.g. a DELETE with a body, are left out; the Integration's
+`httpMethodsWithRequestBody` lists the methods. Sentry's
+[server-side data scrubbing](https://docs.sentry.io/security-legal-pii/scrubbing/) can mask more, but don't rely on it
+alone for passwords and payment data.
 
 With `'send_default_pii' => true` in `sentrySettings`, all headers and cookies are sent, the user's IP address is set
 from `yii\web\Request::getUserIP()` (which honors `trustedHosts` when the application runs behind a proxy), and log

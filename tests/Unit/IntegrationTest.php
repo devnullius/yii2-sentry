@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace devnullius\yii2\sentry\tests\Unit;
 
 use devnullius\yii2\sentry\Integration;
+use devnullius\yii2\sentry\tests\Support\BodyReadCountingRequest;
 use devnullius\yii2\sentry\tests\Support\SubIntegration;
 use devnullius\yii2\sentry\tests\Support\TestCase;
 use Sentry\State\Scope;
@@ -125,6 +126,26 @@ final class IntegrationTest extends TestCase
         // Without a "data" key, the SDK's RequestIntegration would add the fields unfiltered.
         $this->assertArrayHasKey('data', $event['request'] ?? []);
         $this->assertStringNotContainsString('hunter2', (string)json_encode($event));
+    }
+
+    public function testTheBodyOfAMethodThatIsNotListedIsLeftOutWithoutBeingRead(): void
+    {
+        // The SDK's RequestIntegration adds a body that Content-Length announces, unless the event has "data". Reading
+        // the body to tell would load all of it into memory, e.g. a large upload.
+        $app = $this->createWebApp([], [
+            'REQUEST_METHOD' => 'DELETE',
+            'REQUEST_URI' => '/site/post-log',
+            'CONTENT_TYPE' => 'application/octet-stream',
+            'CONTENT_LENGTH' => '104857600',
+        ], ['request' => ['class' => BodyReadCountingRequest::class]]);
+        $this->runningAction($app, 'post-log');
+
+        $app->get('sentry')->getHub()->captureMessage('hello');
+
+        $this->assertSame('Not available: DELETE is not in httpMethodsWithRequestBody.', $this->singleEvent()['request']['data'] ?? null);
+        $request = $app->getRequest();
+        $this->assertInstanceOf(BodyReadCountingRequest::class, $request);
+        $this->assertSame(0, $request->rawBodyReads);
     }
 
     public function testSubclassesOfTheIntegrationAreApplied(): void

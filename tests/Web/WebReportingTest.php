@@ -163,6 +163,50 @@ final class WebReportingTest extends WebServerTestCase
         $this->assertStringNotContainsString('hunter2', (string)json_encode($this->singleEvent($response)));
     }
 
+    public function testTheBodyOfARequestWhoseMethodIsNotListedIsNotSent(): void
+    {
+        // httpMethodsWithRequestBody lists POST, PUT and PATCH: the SDK's RequestIntegration must not send the body of
+        // another method instead, unfiltered.
+        $response = $this->request('default', 'DELETE', '/site/post-log', self::FORM, 'username=alice&password=hunter2');
+
+        $event = $this->singleEvent($response);
+        $this->assertStringNotContainsString('hunter2', (string)json_encode($event));
+        $this->assertSame('Not available: DELETE is not in httpMethodsWithRequestBody.', $event['request']['data'] ?? null);
+    }
+
+    public function testTheBodyOfAMethodLeftOutOfHttpMethodsWithRequestBodyIsNotSent(): void
+    {
+        $response = $this->request('post_bodies_only', 'PUT', '/site/post-log', ['Content-Type: application/json'], '{"username":"alice","password":"hunter2"}');
+
+        $this->assertStringNotContainsString('hunter2', (string)json_encode($this->singleEvent($response)));
+    }
+
+    public function testAClientCannotGetPiiBodyFieldsSkippedByOverridingTheMethod(): void
+    {
+        // Yii takes the method from the X-Http-Method-Override header, and json_api filters "password" on this route.
+        $response = $this->request('json_api', 'POST', '/site/post-log', ['Content-Type: application/json', 'X-Http-Method-Override: DELETE'], '{"username":"alice","password":"hunter2"}');
+
+        $this->assertStringNotContainsString('hunter2', (string)json_encode($this->singleEvent($response)));
+    }
+
+    /**
+     * @return array<string, array{0: string}>
+     */
+    public static function methodsOfRequestsWithoutABody(): array
+    {
+        return ['GET' => ['GET'], 'DELETE' => ['DELETE']];
+    }
+
+    /**
+     * @dataProvider methodsOfRequestsWithoutABody
+     */
+    public function testARequestWithoutABodyGetsNoBodyData(string $method): void
+    {
+        $response = $this->request('default', $method, '/site/log-error');
+
+        $this->assertArrayNotHasKey('data', $this->singleEvent($response)['request'] ?? []);
+    }
+
     public function testTheSdkDataCollectionPolicyIsHonored(): void
     {
         $response = $this->request('data_collection', 'POST', '/site/post-log', self::FORM, 'username=alice&password=hunter2');

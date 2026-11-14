@@ -23,6 +23,10 @@ All notable changes to this project are documented here. The format is based on
   list of words, so a session cookie under another name, like `advanced-frontend` in Yii's advanced application
   template, was sent. The names the application gives Yii's session, CSRF and identity cookies are now added to that
   list.
+- The body of a request whose method is not in `httpMethodsWithRequestBody` was sent by the SDK's `RequestIntegration`
+  as it was, unfiltered by `piiBodyFields`: e.g. a DELETE with a body, a PUT once the list is narrowed to POST, or any
+  request that a client marks as another method with Yii's `X-Http-Method-Override` header or `_method` field. Such
+  bodies are now left out, as the setting says.
 
 ## [4.1.0] - 2026-11-10
 
