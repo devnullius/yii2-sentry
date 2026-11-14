@@ -207,9 +207,11 @@ class LogTarget extends Target
             );
         } elseif (strpos($category, 'yii\db\Connection::') === 0) {
             // E.g. "Connection (pgsql:host=replica;password=secret) failed: ...", or the line logged at the info level
-            // when a connection is opened: "Opening DB connection: pgsql:host=db;password=secret".
+            // when a connection is opened: "Opening DB connection: pgsql:host=db;password=secret". ODBC takes a value
+            // in braces as it is, with any ";" in it and "}}" for a "}", e.g. "Pwd={pa;ss}"; a brace that is not
+            // closed is left out up to the end of the DSN.
             $text = preg_replace_callback(
-                '/((?:^|[;:])\s*(?:password|pwd)\s*=).*?(?=;|\) failed: |$)/i',
+                '/((?:^|[;:])\s*(?:password|pwd)\s*=)(?:\s*\{(?:(?!\) failed: )[^}]|\}\})*\}?)?.*?(?=;|\) failed: |$)/i',
                 static function (array $match): string {
                     return $match[1] . self::FILTERED;
                 },

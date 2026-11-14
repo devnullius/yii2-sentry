@@ -177,6 +177,42 @@ final class LogTargetTest extends TestCase
         );
     }
 
+    /**
+     * ODBC takes a value in braces as it is, with any ";" in it, and "}}" for a "}".
+     *
+     * @return array<string, array{0: string, 1: string}>
+     */
+    public static function dsnsWithAPasswordInBraces(): array
+    {
+        return [
+            'a ";" in the password' => [
+                'odbc:Driver={ODBC Driver 18 for SQL Server};Server=replica;Uid=app;Pwd={db;secret};Encrypt=yes',
+                'odbc:Driver={ODBC Driver 18 for SQL Server};Server=replica;Uid=app;Pwd=[Filtered PII];Encrypt=yes',
+            ],
+            'a "}" in the password' => [
+                'odbc:Server=replica;Uid=app;PWD={db}};secret}',
+                'odbc:Server=replica;Uid=app;PWD=[Filtered PII]',
+            ],
+            'a brace that is not closed' => [
+                'odbc:Server=replica;Uid=app;Pwd={db;secret',
+                'odbc:Server=replica;Uid=app;Pwd=[Filtered PII]',
+            ],
+        ];
+    }
+
+    /**
+     * @dataProvider dsnsWithAPasswordInBraces
+     */
+    public function testNoPartOfAPasswordInBracesIsSent(string $dsn, string $sent): void
+    {
+        $this->appWithLogTarget(['send_default_pii' => true]);
+
+        Yii::warning("Connection ($dsn) failed: SQLSTATE[08001] login failed", 'yii\db\Connection::openFromPoolSequentially');
+        Yii::getLogger()->flush(true);
+
+        $this->assertSame("Connection ($sent) failed: SQLSTATE[08001] login failed", $this->singleEvent()['message'] ?? null);
+    }
+
     public function testOnlyYiisOwnWarningsAreScrubbed(): void
     {
         $this->appWithLogTarget();
