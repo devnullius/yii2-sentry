@@ -130,6 +130,8 @@ breadcrumbs or Sentry Logs. The README explains it all. What changes for 4.x use
 - **The body is sent once**, as its fields, in `request.data`: the `decodedParams` additional data is gone. Bodies that
   can't be read as fields (XML, plain text, invalid JSON) are left out, as secrets in them can't be found; set
   `sendUnparsedBodies` to send them as they are.
+- **Large bodies are left out**: the SDK's `max_request_body_size` option now applies, 10,000 bytes by default, where
+  4.x sent bodies whole. Set it to `'always'` in `sentrySettings` to send bodies of any size.
 - **Values in database errors are masked**: "Duplicate entry ? for key 'email'".
 - **In `aggregate` mode**, Yii's prefix of the lines in `logs` no longer holds the session ID, also with
   `send_default_pii`.

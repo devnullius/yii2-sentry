@@ -24,6 +24,9 @@ to check when upgrading. The requirements are those of 4.1, with Sentry PHP SDK 
   Sentry Logs.
 - Multipart form bodies are no longer left to the SDK, which sent their fields unfiltered (4.1.1 applies
   `piiBodyFields` to them).
+- The body of a request whose method is not in `httpMethodsWithRequestBody` is no longer left to the SDK, which sent it
+  unfiltered: e.g. a DELETE with a body, or any request that a client marks as another method with Yii's
+  `X-Http-Method-Override` header or `_method` field (also fixed in 4.1.1).
 - Yii's own log lines are scrubbed wherever they are sent, as events, breadcrumbs, Sentry Logs and in `aggregate` mode:
   a yii2-httpclient call keeps its method and URL (Yii logs every header and the body); logins, logouts and emails lose
   the user ID, IP address and recipients while personal data is hidden; the warnings about an invalid login cookie or
@@ -94,6 +97,9 @@ to check when upgrading. The requirements are those of 4.1, with Sentry PHP SDK 
 - The request body is sent once, as its fields, in `request.data`; the `decodedParams` additional data is gone. JSON
   bodies are read as fields also without a Yii parser configured for them, and bodies that can't be read as fields
   (XML, text, invalid JSON) are left out unless `sendUnparsedBodies` is set.
+- Bodies larger than the SDK's `max_request_body_size` allows, 10,000 bytes by default, are left out: 4.x sent them
+  whole. An upload that is left out isn't loaded into memory to report an error during it, when the client sends its
+  size in the `Content-Length` header.
 - `piiBodyFields` names match at any depth of the body, like `personalFields`; a name with a list limits the match to
   the fields under it.
 - `piiHeaders` holds the headers with the visitor's IP address (`Forwarded`, `X-Forwarded-For`, `X-Real-IP`):

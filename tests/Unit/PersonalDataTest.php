@@ -6,6 +6,7 @@ namespace devnullius\yii2\sentry\tests\Unit;
 
 use devnullius\yii2\sentry\Integration;
 use devnullius\yii2\sentry\LogTarget;
+use devnullius\yii2\sentry\tests\Support\BodyReadCountingRequest;
 use devnullius\yii2\sentry\tests\Support\TestCase;
 use PDOException;
 use RuntimeException;
@@ -271,6 +272,61 @@ final class PersonalDataTest extends TestCase
         $event = $this->postForm(['notes' => str_repeat('a', 2000)], ['sentrySettings' => ['max_request_body_size' => 'small']]);
 
         $this->assertSame('[not sent: larger than max_request_body_size]', $event['request']['data'] ?? null);
+    }
+
+    public function testABodyOverTheSdkSizeLimitIsLeftOutWithoutBeingRead(): void
+    {
+        // Content-Length gives the size: reading the body would load all of it into memory, e.g. a large upload.
+        $app = $this->createWebApp([], [
+            'REQUEST_METHOD' => 'PUT',
+            'REQUEST_URI' => '/site/post-log',
+            'CONTENT_TYPE' => 'application/json',
+            'CONTENT_LENGTH' => '104857600',
+        ], ['request' => ['class' => BodyReadCountingRequest::class]]);
+
+        $event = $this->captureFromAction($app);
+
+        $this->assertSame('[not sent: larger than max_request_body_size]', $event['request']['data'] ?? null);
+        $request = $app->getRequest();
+        $this->assertInstanceOf(BodyReadCountingRequest::class, $request);
+        $this->assertSame(0, $request->rawBodyReads);
+    }
+
+    public function testTheBodyOfAMethodThatIsNotListedIsLeftOutWithoutBeingRead(): void
+    {
+        // The SDK's RequestIntegration adds a body that Content-Length announces, unless the event has "data". Reading
+        // the body to tell would load all of it into memory, e.g. a large upload.
+        $app = $this->createWebApp([], [
+            'REQUEST_METHOD' => 'DELETE',
+            'REQUEST_URI' => '/site/post-log',
+            'CONTENT_TYPE' => 'application/octet-stream',
+            'CONTENT_LENGTH' => '104857600',
+        ], ['request' => ['class' => BodyReadCountingRequest::class]]);
+
+        $event = $this->captureFromAction($app);
+
+        $this->assertSame('[not sent: DELETE is not in httpMethodsWithRequestBody]', $event['request']['data'] ?? null);
+        $request = $app->getRequest();
+        $this->assertInstanceOf(BodyReadCountingRequest::class, $request);
+        $this->assertSame(0, $request->rawBodyReads);
+    }
+
+    public function testTheFieldsOfAMultipartFormAreSentWhateverTheSizeOfItsFiles(): void
+    {
+        // Content-Length counts the files too, but only the fields are sent: their size is what counts.
+        $_POST = ['username' => 'alice'];
+        $_FILES = ['avatar' => ['name' => 'me.png', 'type' => 'image/png', 'tmp_name' => '/tmp/php-upload', 'error' => UPLOAD_ERR_OK, 'size' => 5242880]];
+        $app = $this->createWebApp([], [
+            'REQUEST_METHOD' => 'POST',
+            'REQUEST_URI' => '/site/post-log',
+            'CONTENT_TYPE' => 'multipart/form-data; boundary=x',
+            'CONTENT_LENGTH' => '5243000',
+        ]);
+        $app->getRequest()->setRawBody('');
+
+        $event = $this->captureFromAction($app);
+
+        $this->assertSame(['username' => 'alice'], $event['request']['data'] ?? null);
     }
 
     // --- Query string and Referer -------------------------------------------------------------------------------

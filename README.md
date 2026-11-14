@@ -289,7 +289,10 @@ The component's `privacy` setting configures all of the above:
 | `piiReplaceText` | `'[Filtered PII]'` | The text that replaces scrubbed values. |
 
 The request body is sent for POST, PUT and PATCH requests, as its fields, in `request.data`, up to the size the SDK's
-`max_request_body_size` option allows.
+`max_request_body_size` option allows: 10,000 bytes by default, any size with `'always'`. A body that is left out is
+replaced by a note saying why, e.g. `[not sent: DELETE is not in httpMethodsWithRequestBody]`. An upload that is left
+out isn't loaded into memory to report an error during it, as long as the client sends its size in the
+`Content-Length` header, as browsers do.
 
 ### The SDK's `data_collection` option
 

@@ -224,6 +224,52 @@ final class WebReportingTest extends WebServerTestCase
         $this->assertStringNotContainsString('annie', (string)json_encode($this->singleEvent($response)));
     }
 
+    public function testTheBodyOfARequestWhoseMethodIsNotListedIsNotSent(): void
+    {
+        // httpMethodsWithRequestBody lists POST, PUT and PATCH: the SDK's RequestIntegration must not send the body of
+        // another method instead, unscrubbed. "nickname" is neither a secret nor personal data by name.
+        $response = $this->request('default', 'DELETE', '/site/post-log', self::FORM, 'username=alice&nickname=annie');
+
+        $event = $this->singleEvent($response);
+        $this->assertSame('[not sent: DELETE is not in httpMethodsWithRequestBody]', $event['request']['data'] ?? null);
+        $this->assertStringNotContainsString('annie', (string)json_encode($event));
+    }
+
+    public function testTheBodyOfAMethodLeftOutOfHttpMethodsWithRequestBodyIsNotSent(): void
+    {
+        $response = $this->request('post_bodies_only', 'PUT', '/site/post-log', ['Content-Type: application/json'], '{"username":"alice","nickname":"annie"}');
+
+        $this->assertStringNotContainsString('annie', (string)json_encode($this->singleEvent($response)));
+    }
+
+    public function testAClientCannotGetABodySentByOverridingTheMethod(): void
+    {
+        // Yii takes the method from the X-Http-Method-Override header: a POST marked as DELETE is not a listed method.
+        $response = $this->request('default', 'POST', '/site/post-log', array_merge(self::FORM, ['X-Http-Method-Override: DELETE']), 'username=alice&nickname=annie');
+
+        $event = $this->singleEvent($response);
+        $this->assertSame('[not sent: DELETE is not in httpMethodsWithRequestBody]', $event['request']['data'] ?? null);
+        $this->assertStringNotContainsString('annie', (string)json_encode($event));
+    }
+
+    /**
+     * @return array<string, array{0: string}>
+     */
+    public static function methodsOfRequestsWithoutABody(): array
+    {
+        return ['GET' => ['GET'], 'DELETE' => ['DELETE']];
+    }
+
+    /**
+     * @dataProvider methodsOfRequestsWithoutABody
+     */
+    public function testARequestWithoutABodyGetsNoBodyData(string $method): void
+    {
+        $response = $this->request('default', $method, '/site/log-error');
+
+        $this->assertArrayNotHasKey('data', $this->singleEvent($response)['request'] ?? []);
+    }
+
     public function testTheSdkDataCollectionPolicyIsHonored(): void
     {
         $response = $this->request('data_collection', 'POST', '/site/post-log', self::FORM, 'username=alice&password=hunter2');

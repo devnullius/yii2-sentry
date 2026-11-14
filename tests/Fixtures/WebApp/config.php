@@ -84,6 +84,9 @@ return static function (string $scenario, string $outDir, string $run): array {
             $integration->piiBodyFields = ['site/post-log' => ['password']];
             $sentry['integrations'] = $withIntegration($integration);
             break;
+        case 'post_bodies_only':
+            $sentry['privacy'] = ['httpMethodsWithRequestBody' => ['POST']];
+            break;
         case 'trusted_proxy':
             // Typical production: the app sits behind a load balancer that Yii trusts.
             $request['trustedHosts'] = ['127.0.0.1'];

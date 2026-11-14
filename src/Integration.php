@@ -346,23 +346,31 @@ class Integration implements IntegrationInterface
      */
     private function requestBody(Request $request, Options $options, Scrubber $scrubber)
     {
+        $limit = self::requestBodyLimit($options);
+        if ($limit === 0) {
+            return null;
+        }
+
+        // Content-Length tells whether a body is left out without reading it, which could load an upload into memory.
+        // Not for a form that PHP has read into $_POST and $_FILES: only its fields are sent, while its files count in
+        // Content-Length too, so the fields are measured below.
+        $length = self::contentLength($request);
+        if ($length > 0 && $_POST === [] && $_FILES === []) {
+            $notSent = $this->whyNotSent($request, $limit, $length);
+            if ($notSent !== null) {
+                return $notSent;
+            }
+        }
+
         $rawBody = $request->getRawBody();
         // For a multipart form, PHP has read the body into $_POST and $_FILES, and the raw body is empty.
         if ($rawBody === '' && $_POST === [] && $_FILES === []) {
             return null;
         }
 
-        $limit = self::requestBodyLimit($options);
-        if ($limit === 0) {
-            return null;
-        }
-
-        if (!in_array($request->getMethod(), $this->httpMethodsWithRequestBody, true)) {
-            return sprintf(self::NOT_SENT, $request->getMethod() . ' is not in httpMethodsWithRequestBody');
-        }
-
-        if ($limit !== null && strlen($rawBody) > $limit) {
-            return sprintf(self::NOT_SENT, 'larger than max_request_body_size');
+        $notSent = $this->whyNotSent($request, $limit, strlen($rawBody));
+        if ($notSent !== null) {
+            return $notSent;
         }
 
         $routeRules = [];
@@ -392,6 +400,33 @@ class Integration implements IntegrationInterface
         }
 
         return $this->scrubBody($fields, $scrubber, (array)$routeRules);
+    }
+
+    /**
+     * @param int|null $limit the most bytes of a body that are sent, or null for any size
+     *
+     * @return string|null a note saying why a body of this size is left out, or null when it may be sent
+     */
+    private function whyNotSent(Request $request, ?int $limit, int $size): ?string
+    {
+        if (!in_array($request->getMethod(), $this->httpMethodsWithRequestBody, true)) {
+            return sprintf(self::NOT_SENT, $request->getMethod() . ' is not in httpMethodsWithRequestBody');
+        }
+
+        if ($limit !== null && $size > $limit) {
+            return sprintf(self::NOT_SENT, 'larger than max_request_body_size');
+        }
+
+        return null;
+    }
+
+    /**
+     * @return int the size of the request body as Content-Length announces it, or 0 without the header
+     */
+    private static function contentLength(Request $request): int
+    {
+        // Where PHP has no getallheaders(), Yii's headers lack Content-Length, which is then only in $_SERVER.
+        return (int)($request->getHeaders()->get('Content-Length') ?? $_SERVER['CONTENT_LENGTH'] ?? 0);
     }
 
     /**
