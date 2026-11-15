@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace devnullius\yii2\sentry\tests\Worker;
 
+use Composer\InstalledVersions;
 use devnullius\yii2\sentry\tests\Fixtures\Jobs\ChargeJob;
 use devnullius\yii2\sentry\tests\Fixtures\Jobs\CrashingJob;
 use devnullius\yii2\sentry\tests\Fixtures\Jobs\GreetJob;
@@ -116,11 +117,27 @@ final class QueueWorkerTest extends ConsoleProcessTestCase
 
     public function testAProcessThatEndsAJobWithoutRunningItIsNotTraced(): void
     {
-        // yii2-queue runs no attempt past the job's attempts, e.g. one reserved again after the worker running it died.
-        $process = $this->runCommand(['queue/exec', '7', '300', '2', '0'], serialize(new GreetJob()), 'tracing');
+        // A handler of the queue's beforeExec event marks the job as handled, so yii2-queue doesn't run it.
+        $process = $this->runCommand(
+            ['queue/exec', '7', '300', '1', '0'],
+            serialize(new GreetJob()),
+            'tracing_handled'
+        );
 
         $this->assertSame(0, $process['exitCode'], $process['log']);
         $this->assertSame([], $process['transactions'], $process['log']);
+    }
+
+    public function testAnAttemptPastTheJobsAttemptsIsTracedOnlyIfItRuns(): void
+    {
+        // E.g. an attempt reserved again after the worker running it died: yii2-queue 2.3.8 ends it without running it,
+        // and other versions run it.
+        $process = $this->runCommand(['queue/exec', '7', '300', '2', '0'], serialize(new GreetJob()), 'tracing');
+
+        $this->assertSame(0, $process['exitCode'], $process['log']);
+        $runs = version_compare((string)InstalledVersions::getVersion('yiisoft/yii2-queue'), '2.3.9', '>=');
+        $names = array_column($process['transactions'], 'transaction');
+        $this->assertSame($runs ? [GreetJob::class] : [], $names, $process['log']);
     }
 
     /**

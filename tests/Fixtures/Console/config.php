@@ -6,6 +6,7 @@ use devnullius\yii2\sentry\Component;
 use devnullius\yii2\sentry\LogTarget;
 use devnullius\yii2\sentry\tests\Fixtures\Console\ReportController;
 use devnullius\yii2\sentry\tests\Support\RecordingTransport;
+use yii\queue\ExecEvent;
 use yii\queue\file\Queue;
 use yii\queue\LogBehavior;
 
@@ -22,6 +23,11 @@ return static function (string $scenario, string $outFile, string $queuePath): a
         'sentrySettings' => ['transport' => new RecordingTransport($outFile)],
     ];
     $logTarget = ['class' => LogTarget::class];
+    $queue = [
+        'class' => Queue::class,
+        'path' => $queuePath,
+        'as log' => LogBehavior::class,
+    ];
 
     switch ($scenario) {
         case 'default':
@@ -37,6 +43,13 @@ return static function (string $scenario, string $outFile, string $queuePath): a
             break;
         case 'tracing':
             $sentry['sentrySettings']['traces_sample_rate'] = 1.0;
+            break;
+        case 'tracing_handled':
+            $sentry['sentrySettings']['traces_sample_rate'] = 1.0;
+            // A handler that ends each job before it runs, as one may for a job it finds outdated.
+            $queue['on beforeExec'] = static function (ExecEvent $event): void {
+                $event->handled = true;
+            };
             break;
         case 'cron':
             $sentry['cronMonitors'] = ['report/crash', 'report/exit', 'report/end', 'report/fatal', 'report/fork'];
@@ -57,11 +70,7 @@ return static function (string $scenario, string $outFile, string $queuePath): a
             'log' => [
                 'targets' => [$logTarget],
             ],
-            'queue' => [
-                'class' => Queue::class,
-                'path' => $queuePath,
-                'as log' => LogBehavior::class,
-            ],
+            'queue' => $queue,
         ],
     ];
 };

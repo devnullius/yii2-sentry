@@ -151,8 +151,8 @@ final class QueueListener
             array_pop($this->workers);
         });
         $this->listen(Controller::class, Controller::EVENT_BEFORE_ACTION, function (ActionEvent $event): void {
-            // E.g. the process a worker starts to run one job, which ends without running it when the attempt is past
-            // the job's attempts.
+            // E.g. the process a worker starts to run one job, which ends without running it when a handler marks the
+            // job as handled, or, with yii2-queue 2.3.8, when the attempt is past the job's attempts.
             $app = Yii::$app;
             if ($this->running === [] && $app !== null && $event->action === $app->requestedAction && self::isWorkerAction($event->action)) {
                 $this->tracer->stopTracingCommand();
