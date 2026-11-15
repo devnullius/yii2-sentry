@@ -106,6 +106,8 @@ class Component extends \yii\base\Component implements BootstrapInterface
      * - `continueTraces`: continue the trace of the caller (the `sentry-trace` and `baggage` headers), so that this
      *   request's errors and spans show in it; also without tracing. The same for queue jobs that carry the trace of
      *   the code that queued them, see [[TraceableJobInterface]].
+     * - `maskSqlValues`: replace the values in the SQL of query spans with "?". Turn it off only if your queries hold
+     *   no personal data or secrets.
      */
     public $tracing = [];
     /**

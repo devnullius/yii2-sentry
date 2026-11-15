@@ -354,6 +354,9 @@ The component's `tracing` setting turns each part off, e.g. `'tracing' => ['view
 | `queue` | A transaction for every yii2-queue job a worker runs, named by the job's class, and a span for every job queued. A job run inside a traced request or command, as with the sync queue, is a span of it. |
 | `continueTraces` | Continue the trace of the caller, from the `sentry-trace` and `baggage` headers, so that the request's errors and spans show in it; also without tracing. The same for queue jobs that carry the trace of the code that queued them. |
 
+Query spans have their values masked, as SQL is wherever it is sent: `'tracing' => ['maskSqlValues' => false]` keeps
+them as written. Turn it off only if your queries hold no personal data or secrets.
+
 **Traces across services.** Outgoing yii2-httpclient calls carry the `sentry-trace` and `baggage` headers, so that a
 service you call, if it uses Sentry too, continues the trace. They are sent to every host unless you list your own in
 the SDK's `trace_propagation_targets` option: a third-party API would see your trace ID and, in `baggage`, details

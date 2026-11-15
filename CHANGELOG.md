@@ -55,7 +55,8 @@ to check when upgrading. The requirements are those of 4.1, with Sentry PHP SDK 
 - Tracing, once the SDK's `traces_sample_rate` or `traces_sampler` is set: a transaction for every web request, named
   by its route, timed from when PHP received the request and finished after the response is sent, with its HTTP
   status, and for every console command; spans for bootstrap, actions, views, yii2-httpclient calls and SQL queries
-  (with values masked). The new `tracing` setting turns each part off.
+  (with values masked). The new `tracing` setting turns each part off; its `maskSqlValues` keeps the SQL of query spans
+  as written.
 - Traces continue across services: incoming `sentry-trace` and `baggage` headers are continued, and yii2-httpclient
   calls carry them (to the hosts in the SDK's `trace_propagation_targets`, or all), also without tracing.
   `traceMetaTags()` lets Sentry's browser SDK continue the request's trace.

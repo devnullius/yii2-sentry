@@ -55,6 +55,7 @@ final class Tracer
         'database' => true,
         'queue' => true,
         'continueTraces' => true,
+        'maskSqlValues' => true,
     ];
 
     /**
@@ -747,7 +748,7 @@ final class Tracer
         $parent->startChild(
             SpanContext::make()
                 ->setOp('db.sql.query')
-                ->setDescription(SqlMasker::mask($sql))
+                ->setDescription($this->settings['maskSqlValues'] ? SqlMasker::mask($sql) : $sql)
                 ->setOrigin('auto.db.yii2')
                 ->setStartTimestamp($start)
         )->finish($end);

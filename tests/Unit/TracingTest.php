@@ -440,6 +440,20 @@ final class TracingTest extends TestCase
         $this->assertSame([], $this->spans($transaction, 'db.sql.query'));
     }
 
+    public function testSqlValuesInQuerySpansCanBeKept(): void
+    {
+        $app = $this->tracedWebApp(
+            ['tracing' => ['maskSqlValues' => false]],
+            [],
+            ['db' => ['class' => Connection::class, 'dsn' => 'sqlite::memory:']]
+        );
+
+        $app->runAction('site/query');
+        $transaction = $this->finishRequest($app, 200);
+
+        $this->assertSame(["SELECT 'ann@example.com' AS email"], array_column($this->spans($transaction, 'db.sql.query'), 'description'));
+    }
+
     // --- Trace linking ------------------------------------------------------------------------------------------
 
     public function testErrorsJoinTheCallersTraceEvenWithoutTracing(): void
