@@ -570,12 +570,13 @@ final class Tracer
         $span = null;
         $parent = $this->hub->getSpan();
         if ($parent !== null && $parent->getSampled()) {
+            $recordedUrl = self::scrubCredentials($url, ($this->scrubber)());
             $span = $parent->startChild(
                 SpanContext::make()
                     ->setOp('http.client')
-                    ->setDescription("$method $url")
+                    ->setDescription("$method $recordedUrl")
                     ->setOrigin('auto.http.yii2_httpclient')
-                    ->setData(['http.request.method' => $method, 'url' => $url])
+                    ->setData(['http.request.method' => $method, 'url' => $recordedUrl])
             );
         }
         $this->httpCalls[spl_object_id($request)] = [$request, $span, microtime(true)];
@@ -644,14 +645,18 @@ final class Tracer
     }
 
     /**
-     * @return array<string, string> the call's URL without the query string, its method, and its scrubbed query string
+     * @return array<string, string> the call's URL without the query string, with its credentials scrubbed, its method,
+     *                               and its scrubbed query string
      */
     private function httpCallData(HttpClientRequest $request): array
     {
         [$url, $query] = self::splitUrl((string)$request->getFullUrl());
-        $data = ['url' => $url, 'http.request.method' => strtoupper((string)$request->getMethod())];
-
         $scrubber = ($this->scrubber)();
+        $data = [
+            'url' => self::scrubCredentials($url, $scrubber),
+            'http.request.method' => strtoupper((string)$request->getMethod()),
+        ];
+
         if ($query !== '' && $scrubber !== null) {
             $data['http.query'] = $scrubber->scrubQueryString($query);
         }
@@ -823,6 +828,15 @@ final class Tracer
         $query = strpos($url, '?');
 
         return $query === false ? [$url, ''] : [substr($url, 0, $query), substr($url, $query + 1)];
+    }
+
+    /**
+     * A URL as it is recorded: its credentials, e.g. "https://user:password@...", scrubbed like other secrets, or left
+     * out when there is no scrubber, like the query string.
+     */
+    private static function scrubCredentials(string $url, ?Scrubber $scrubber): string
+    {
+        return $scrubber !== null ? $scrubber->scrubCredentials($url) : Scrubber::replaceCredentials($url, '');
     }
 
     private static function isHandlingAnException(?Application $app): bool

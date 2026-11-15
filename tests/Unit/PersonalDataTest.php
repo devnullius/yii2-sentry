@@ -349,6 +349,14 @@ final class PersonalDataTest extends TestCase
         $this->assertSame(['https://example.com/site/reset?token=[Filtered PII]&step=2#form'], $headers['referer'] ?? null);
     }
 
+    public function testCredentialsInTheRefererAreScrubbed(): void
+    {
+        $event = $this->get([], ['HTTP_REFERER' => 'https://user:hunter2@example.com/site/cart?step=2']);
+
+        $headers = array_change_key_case($event['request']['headers'] ?? [], CASE_LOWER);
+        $this->assertSame(['https://[Filtered PII]@example.com/site/cart?step=2'], $headers['referer'] ?? null);
+    }
+
     // --- Database errors ----------------------------------------------------------------------------------------
 
     public function testValuesInDatabaseErrorsAreMasked(): void
@@ -440,6 +448,17 @@ final class PersonalDataTest extends TestCase
                 "POST https://api.example.com/v1/charges?api_key=k1\nAuthorization: Bearer sk_live_1\n\ncard=4111111111111111",
                 'POST https://api.example.com/v1/charges?api_key=[Filtered PII]',
             ],
+            // The credentials end at the last "@" before the path.
+            'outgoing HTTP call with credentials in its URL' => [
+                'yii\httpclient\CurlTransport::send',
+                "GET https://ci:p@ss@api.example.com/v1/status?token=t1\nAccept: application/json",
+                'GET https://[Filtered PII]@api.example.com/v1/status?token=[Filtered PII]',
+            ],
+            'outgoing HTTP call with an "@" in its path' => [
+                'yii\httpclient\CurlTransport::send',
+                'GET https://cdn.example.com/img/logo@2x.png',
+                'GET https://cdn.example.com/img/logo@2x.png',
+            ],
             'database connection' => [
                 'yii\db\Connection::open',
                 'Opening DB connection: pgsql:host=db;dbname=app;password=db-secret',
@@ -492,13 +511,24 @@ final class PersonalDataTest extends TestCase
             ['yii\web\User::login', "User '42' logged in from 203.0.113.10 with duration 0."],
             ['yii\web\User::renewAuthStatus', "Invalid session auth key attempted for user '42' from 203.0.113.10: k3y"],
             ['yii\db\Connection::open', 'Opening DB connection: pgsql:host=db;password=db-secret'],
+            ['yii\httpclient\CurlTransport::send', 'GET https://user:hunter2@api.example.com/v1/status'],
         ], ['sentrySettings' => ['send_default_pii' => true]]);
 
         $this->assertSame([
             "User '42' logged in from 203.0.113.10 with duration 0.",
             "Invalid session auth key attempted for user '42' from 203.0.113.10: [Filtered PII]",
             'Opening DB connection: pgsql:host=db;password=[Filtered PII]',
+            'GET https://[Filtered PII]@api.example.com/v1/status',
         ], $breadcrumbs);
+    }
+
+    public function testCredentialsInUrlsAreSentWithSecrets(): void
+    {
+        $line = 'GET https://user:hunter2@api.example.com/v1/status';
+
+        $breadcrumbs = $this->breadcrumbsAfter([['yii\httpclient\CurlTransport::send', $line]], ['privacy' => ['scrubSecrets' => false]]);
+
+        $this->assertSame([$line], $breadcrumbs);
     }
 
     /**

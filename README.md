@@ -242,6 +242,8 @@ Also by default:
 - A request body that can't be read as fields (XML, plain text, invalid JSON) is left out, as secrets in it can't be
   found.
 - Values in database errors are masked: "Duplicate entry ? for key 'email'".
+- Credentials in a URL, as in `https://user:password@api.example.com`, are scrubbed like other secrets: in the spans
+  and breadcrumbs of yii2-httpclient calls, in Yii's log lines for them and in the `Referer` header.
 - Yii's own log lines are scrubbed wherever they are sent, as events, breadcrumbs or Sentry Logs: a yii2-httpclient
   call keeps its method and URL, as Yii logs every header and the body; logins, logouts and emails lose the user ID, IP
   address and recipients while personal data is hidden; the warnings about an invalid login cookie or session lose the

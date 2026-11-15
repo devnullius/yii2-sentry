@@ -347,6 +347,59 @@ final class TracingTest extends TestCase
         $this->assertNull($transport->sent[0]->getHeaders()->get('sentry-trace'));
     }
 
+    public function testCredentialsInTheUrlOfAnOutgoingCallAreScrubbed(): void
+    {
+        $app = $this->tracedWebApp([], [], ['log' => ['targets' => ['sentry' => ['class' => LogTarget::class]]]]);
+        $app->getLog();
+        $transport = new FakeHttpTransport();
+
+        (new Client(['transport' => $transport]))->get('https://user:hunter2@api.example.com/v1/status?token=t1')->send();
+        Yii::error('a later problem', 'app');
+        Yii::getLogger()->flush(true);
+        $transaction = $this->finishRequest($app, 200);
+
+        $url = 'https://[Filtered PII]@api.example.com/v1/status';
+        $span = $this->spans($transaction, 'http.client')[0] ?? [];
+        $this->assertSame(["GET $url", $url], [$span['description'] ?? null, $span['data']['url'] ?? null]);
+        $breadcrumbs = array_filter($this->singleEvent()['breadcrumbs']['values'] ?? [], static function (array $breadcrumb): bool {
+            return ($breadcrumb['category'] ?? null) === 'http';
+        });
+        $this->assertSame([$url], array_column(array_column($breadcrumbs, 'data'), 'url'));
+        $this->assertStringNotContainsString('hunter2', (string)json_encode([$this->transport->events(), $transaction]));
+        $this->assertSame(
+            'https://user:hunter2@api.example.com/v1/status?token=t1',
+            $transport->sent[0]->getFullUrl(),
+            'The call is made as it was.'
+        );
+    }
+
+    /**
+     * @return array<string, array{0: array<string, mixed>, 1: string}>
+     */
+    public static function credentialSettings(): array
+    {
+        return [
+            'scrubbed by default' => [[], 'GET https://[Filtered PII]@api.example.com/v1/status'],
+            'sent with secrets' => [['privacy' => ['scrubSecrets' => false]], 'GET https://user:hunter2@api.example.com/v1/status'],
+            'left out without the privacy integration' => [['integrations' => []], 'GET https://api.example.com/v1/status'],
+        ];
+    }
+
+    /**
+     * @dataProvider credentialSettings
+     *
+     * @param array<string, mixed> $sentry
+     */
+    public function testCredentialsInTheUrlOfAnOutgoingCallFollowScrubSecrets(array $sentry, string $description): void
+    {
+        $app = $this->tracedWebApp($sentry);
+
+        (new Client(['transport' => new FakeHttpTransport()]))->get('https://user:hunter2@api.example.com/v1/status')->send();
+        $transaction = $this->finishRequest($app, 200);
+
+        $this->assertSame($description, $this->spans($transaction, 'http.client')[0]['description'] ?? null);
+    }
+
     // --- Database queries ---------------------------------------------------------------------------------------
 
     public function testSqlQueriesAreSpansWithTheirValuesMasked(): void

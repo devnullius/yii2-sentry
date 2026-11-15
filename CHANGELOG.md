@@ -32,6 +32,9 @@ to check when upgrading. The requirements are those of 4.1, with Sentry PHP SDK 
   the user ID, IP address and recipients while personal data is hidden; the warnings about an invalid login cookie or
   session lose the auth key, and the user ID and IP address while personal data is hidden; passwords in database DSNs
   are removed. SQL log lines are masked wherever they are sent too.
+- Credentials in a URL, e.g. `https://user:password@api.example.com`, are scrubbed like other secrets: in the spans
+  and breadcrumbs of yii2-httpclient calls, in Yii's log lines for them and in the `Referer` header (4.1.1 leaves them
+  out of the URLs it traces for yii2-httpclient calls).
 - yii2-queue's log line about a failed job is sent without the job's data it may hold: what the job's process printed
   and the dump of a job that couldn't be read (also fixed in 4.1.1).
 - In `aggregate` mode, the session ID in Yii's log prefix is replaced, as the session cookie is, and the prefix is left

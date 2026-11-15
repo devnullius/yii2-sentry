@@ -109,19 +109,46 @@ final class Scrubber
     }
 
     /**
-     * Scrubs the query string of a URL, e.g. of the "Referer" header.
+     * Scrubs the query string and the credentials of a URL, e.g. of the "Referer" header, also after a method, e.g.
+     * "GET https://user:password@api.example.com/charges?token=...".
      */
     public function scrubUrl(string $url): string
     {
         $queryStart = strpos($url, '?');
-        if ($queryStart === false) {
-            return $url;
+        if ($queryStart !== false) {
+            $fragmentStart = strpos($url, '#', $queryStart);
+            $queryEnd = $fragmentStart === false ? strlen($url) : $fragmentStart;
+            $queryString = substr($url, $queryStart + 1, $queryEnd - $queryStart - 1);
+            $url = substr($url, 0, $queryStart + 1) . $this->scrubQueryString($queryString) . substr($url, $queryEnd);
         }
 
-        $fragmentStart = strpos($url, '#', $queryStart);
-        $queryEnd = $fragmentStart === false ? strlen($url) : $fragmentStart;
-        $queryString = substr($url, $queryStart + 1, $queryEnd - $queryStart - 1);
+        return $this->scrubCredentials($url);
+    }
 
-        return substr($url, 0, $queryStart + 1) . $this->scrubQueryString($queryString) . substr($url, $queryEnd);
+    /**
+     * Replaces the credentials of the URLs in a text, e.g. "https://user:password@api.example.com", while secrets are
+     * scrubbed.
+     */
+    public function scrubCredentials(string $text): string
+    {
+        return $this->secrets !== null ? self::replaceCredentials($text, (string)$this->replacement) : $text;
+    }
+
+    /**
+     * Replaces the credentials of the URLs in a text, or leaves them out with an empty replacement.
+     */
+    public static function replaceCredentials(string $text, string $replacement): string
+    {
+        // The credentials end at the last "@" before the path, query string or fragment.
+        $result = preg_replace_callback(
+            '~\b([a-z][a-z\d+.-]*://)[^/?#\s]*@~i',
+            static function (array $match) use ($replacement): string {
+                return $match[1] . ($replacement !== '' ? $replacement . '@' : '');
+            },
+            $text
+        );
+
+        // On a regular expression failure, show nothing rather than the credentials.
+        return $result ?? $replacement;
     }
 }
