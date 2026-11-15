@@ -3,29 +3,61 @@ declare(strict_types=1);
 
 namespace devnullius\yii2\sentry;
 
+use Yii;
+use yii\db\Connection;
+
 /**
  * Replaces the values written into SQL statements (quoted strings and numbers) and database error messages with "?",
  * so that they can be sent to Sentry without the data they carry. Identifiers, keywords and parameter placeholders
- * are kept.
+ * are kept. Text in double quotes is a string in MySQL and MariaDB, and a name elsewhere: the application's `db`
+ * connection decides.
  *
  * @internal
  */
 final class SqlMasker
 {
     /**
-     * Single-quoted strings, with '' and backslash escapes.
+     * The drivers of MySQL, also used for MariaDB, whose SQL takes text in double quotes as a string.
      */
-    private const STRING = "/'(?:[^'\\\\]++|\\\\.|'')*+'/s";
+    private const MYSQL_DRIVERS = ['mysql', 'mysqli'];
 
     /**
-     * Hexadecimal numbers, not part of an identifier.
+     * A name in backticks, as MySQL, MariaDB and SQLite write them.
      */
-    private const HEX = '/(?<![\w$])0x[0-9a-fA-F]+(?![\w$])/';
+    private const BACKTICK_NAME = '`(?:[^`]++|``)*+`';
 
     /**
-     * Integers and decimals, not part of an identifier (t1, :qp0, $1).
+     * A string in single quotes, with '' and backslash escapes.
      */
-    private const NUMBER = '/(?<![\w$.])\d+(?:\.\d+)?(?:[eE][-+]?\d+)?(?![\w$])/';
+    private const STRING = "'(?:[^'\\\\]++|\\\\.|'')*+'";
+
+    /**
+     * Text in double quotes: in MySQL and MariaDB a string, with "" and backslash escapes, elsewhere a name, with "".
+     */
+    private const DOUBLE_QUOTED_STRING = '"(?:[^"\\\\]++|\\\\.|"")*+"';
+    private const DOUBLE_QUOTED_NAME = '"(?:[^"]++|"")*+"';
+
+    /**
+     * PostgreSQL's dollar-quoted strings, which may hold any quote: $$text$$ or $tag$text$tag$.
+     */
+    private const DOLLAR_QUOTED = '(?<![\w$])\$(?<tag>(?:[A-Za-z_]\w*)?)\$.*?\$\k<tag>\$';
+
+    /**
+     * Hexadecimal numbers, integers and decimals, not part of an identifier (t1, :qp0, $1).
+     */
+    private const NUMBER = '(?<![\w$])0x[0-9a-fA-F]+(?![\w$])|(?<![\w$.])\d+(?:\.\d+)?(?:[eE][-+]?\d+)?(?![\w$])';
+
+    /**
+     * A statement read from left to right, as MySQL and MariaDB read it, then as other databases do: names, kept;
+     * values, masked; and a quote that doesn't pair up, which means that the statement can't be read right.
+     */
+    private const MYSQL_TOKENS = '/(?<name>' . self::BACKTICK_NAME . ')'
+        . '|(?<value>' . self::STRING . '|' . self::DOUBLE_QUOTED_STRING . '|' . self::DOLLAR_QUOTED
+        . '|' . self::NUMBER . ')'
+        . '|(?<unpaired>[\'"])/s';
+    private const TOKENS = '/(?<name>' . self::BACKTICK_NAME . '|' . self::DOUBLE_QUOTED_NAME . ')'
+        . '|(?<value>' . self::STRING . '|' . self::DOLLAR_QUOTED . '|' . self::NUMBER . ')'
+        . "|(?<unpaired>')/s";
 
     /**
      * The text Yii puts between a database's error message and the statement that failed.
@@ -71,10 +103,24 @@ final class SqlMasker
 
     public static function mask(string $sql): string
     {
-        $masked = preg_replace([self::STRING, self::HEX, self::NUMBER], '?', $sql);
+        $unpaired = false;
+        $masked = preg_replace_callback(
+            self::usesMysql() ? self::MYSQL_TOKENS : self::TOKENS,
+            static function (array $match) use (&$unpaired): string {
+                if (isset($match['unpaired'])) {
+                    $unpaired = true;
+                }
 
-        // On a regular expression failure, show nothing rather than the values.
-        return $masked ?? '[query not shown: its values could not be masked]';
+                return isset($match['value']) ? '?' : $match[0];
+            },
+            $sql,
+            -1,
+            $count,
+            PREG_UNMATCHED_AS_NULL
+        );
+
+        // On a regular expression failure, or a quote that doesn't pair up, show nothing rather than the values.
+        return $masked === null || $unpaired ? '[query not shown: its values could not be masked]' : $masked;
     }
 
     /**
@@ -121,5 +167,33 @@ final class SqlMasker
     public static function isDatabaseError(string $class): bool
     {
         return is_a($class, \yii\db\Exception::class, true) || is_a($class, \PDOException::class, true);
+    }
+
+    /**
+     * Whether the application's `db` connection is to MySQL or MariaDB: as the connection says, or its configuration
+     * while it hasn't been created.
+     */
+    private static function usesMysql(): bool
+    {
+        $app = Yii::$app;
+        if ($app === null) {
+            return false;
+        }
+
+        if ($app->has('db', true)) {
+            $db = $app->get('db');
+
+            // The DSN names the driver; without it, getDriverName() would connect to ask.
+            return $db instanceof Connection && strpos((string)$db->dsn, ':') !== false
+                && in_array($db->getDriverName(), self::MYSQL_DRIVERS, true);
+        }
+
+        $config = $app->getComponents()['db'] ?? null;
+        if (!is_array($config)) {
+            return false;
+        }
+        $driver = $config['driverName'] ?? strstr((string)($config['dsn'] ?? ''), ':', true);
+
+        return is_string($driver) && in_array(strtolower($driver), self::MYSQL_DRIVERS, true);
     }
 }

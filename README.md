@@ -242,6 +242,9 @@ Also by default:
 - A request body that can't be read as fields (XML, plain text, invalid JSON) is left out, as secrets in it can't be
   found.
 - Values in database errors are masked: "Duplicate entry ? for key 'email'".
+- SQL is sent with its values masked, in query spans, Yii's SQL log lines and database errors: numbers, and strings
+  in single quotes, in PostgreSQL's dollar quotes and, when the application's `db` connection is to MySQL or
+  MariaDB, in double quotes, which other databases use for names. A statement whose quotes don't pair up isn't sent.
 - Credentials in a URL, as in `https://user:password@api.example.com`, are scrubbed like other secrets: in the spans
   and breadcrumbs of yii2-httpclient calls, in Yii's log lines for them and in the `Referer` header.
 - Yii's own log lines are scrubbed wherever they are sent, as events, breadcrumbs or Sentry Logs: a yii2-httpclient

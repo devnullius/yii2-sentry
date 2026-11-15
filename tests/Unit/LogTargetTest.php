@@ -10,6 +10,7 @@ use devnullius\yii2\sentry\tests\Support\Identity;
 use devnullius\yii2\sentry\tests\Support\TestCase;
 use RuntimeException;
 use Yii;
+use yii\db\Connection;
 use yii\log\Logger;
 use yii\web\Application;
 
@@ -210,6 +211,93 @@ final class LogTargetTest extends TestCase
         Yii::getLogger()->flush(true);
 
         $this->assertSame([['info', 'db.sql.query', $sql]], $this->breadcrumbs($this->singleEvent()));
+    }
+
+    /**
+     * Strings are masked as the database of the application's `db` connection writes them.
+     *
+     * @return array<string, array{0: string, 1: string, 2: string}> the connection's DSN, a statement, and the
+     *                                                                 statement as it is sent
+     */
+    public static function sqlStrings(): array
+    {
+        return [
+            // PostgreSQL's dollar-quoted strings may hold any quote, and "$1" is a parameter.
+            'dollar-quoted string' => [
+                'pgsql:host=db;dbname=app',
+                'SELECT $$hunter2$$ AS "note" FROM "user" WHERE "id" = $1',
+                'SELECT ? AS "note" FROM "user" WHERE "id" = $1',
+            ],
+            'tagged dollar-quoted string' => [
+                'pgsql:host=db;dbname=app',
+                "SELECT \$note\$it's \$\$hunter2\$\$\$note\$ AS \"note\"",
+                'SELECT ? AS "note"',
+            ],
+            // MySQL and MariaDB take text in double quotes as a string, and a backslash escapes a quote.
+            'MySQL string in double quotes' => [
+                'mysql:host=db;dbname=app',
+                'SELECT * FROM `user` WHERE `status` = "hunter2" AND `note` = "say \"hi\""',
+                'SELECT * FROM `user` WHERE `status` = ? AND `note` = ?',
+            ],
+            'MySQL escaped quote' => [
+                'mysql:host=db;dbname=app',
+                "SELECT * FROM `user` WHERE `note` = 'it\\'s' AND `token` = 'hunter2'",
+                'SELECT * FROM `user` WHERE `note` = ? AND `token` = ?',
+            ],
+            // Elsewhere, text in double quotes is a name, kept with any quote and number in it.
+            'PostgreSQL names' => [
+                'pgsql:host=db;dbname=app',
+                "SELECT \"it's\", \"2fa\" FROM \"user\" WHERE \"token\" = 'hunter2'",
+                "SELECT \"it's\", \"2fa\" FROM \"user\" WHERE \"token\" = ?",
+            ],
+            'SQLite names' => [
+                'sqlite::memory:',
+                'SELECT "status" FROM `user2` WHERE `id` = 7',
+                'SELECT "status" FROM `user2` WHERE `id` = ?',
+            ],
+            // Quotes that don't pair up, e.g. around a PostgreSQL string that ends in a backslash: not sent at all.
+            'quotes that do not pair up' => [
+                'pgsql:host=db;dbname=app',
+                "SELECT * FROM \"file\" WHERE \"path\" = 'C:\\' AND \"token\" = 'hunter2'",
+                '[query not shown: its values could not be masked]',
+            ],
+        ];
+    }
+
+    /**
+     * @dataProvider sqlStrings
+     */
+    public function testEveryKindOfStringInSqlIsMasked(string $dsn, string $sql, string $sent): void
+    {
+        $this->createWebApp([], [], [
+            'db' => ['class' => Connection::class, 'dsn' => $dsn],
+            'log' => ['targets' => ['sentry' => ['class' => LogTarget::class]]],
+        ])->getLog();
+
+        Yii::info($sql, 'yii\db\Command::query');
+        Yii::error('payment failed', 'app');
+        Yii::getLogger()->flush(true);
+
+        $this->assertSame([['info', 'db.sql.query', $sent]], $this->breadcrumbs($this->singleEvent()));
+    }
+
+    public function testTheConnectionInUseDecidesToo(): void
+    {
+        $app = $this->createWebApp([], [], [
+            'db' => ['class' => Connection::class, 'dsn' => 'mysql:host=db;dbname=app'],
+            'log' => ['targets' => ['sentry' => ['class' => LogTarget::class]]],
+        ]);
+        $app->getLog();
+        $app->getDb();
+
+        Yii::info('SELECT * FROM `user` WHERE `token` = "hunter2"', 'yii\db\Command::query');
+        Yii::error('payment failed', 'app');
+        Yii::getLogger()->flush(true);
+
+        $this->assertSame(
+            [['info', 'db.sql.query', 'SELECT * FROM `user` WHERE `token` = ?']],
+            $this->breadcrumbs($this->singleEvent())
+        );
     }
 
     // --- Sentry Logs --------------------------------------------------------------------------------------------

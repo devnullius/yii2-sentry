@@ -22,6 +22,9 @@ to check when upgrading. The requirements are those of 4.1, with Sentry PHP SDK 
 - The arguments of the functions in stack traces are scrubbed with the same rules.
 - Values in database error messages are masked, e.g. "Duplicate entry ? for key 'email'", in events, breadcrumbs and
   Sentry Logs.
+- In SQL, strings are masked whatever their quotes: single quotes, PostgreSQL's dollar quotes, and double quotes when
+  the application's `db` connection is to MySQL or MariaDB, as other databases quote names with them. A statement whose
+  quotes don't pair up is not sent.
 - Multipart form bodies are no longer left to the SDK, which sent their fields unfiltered (4.1.1 applies
   `piiBodyFields` to them).
 - The body of a request whose method is not in `httpMethodsWithRequestBody` is no longer left to the SDK, which sent it

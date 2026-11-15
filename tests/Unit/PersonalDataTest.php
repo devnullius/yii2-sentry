@@ -14,6 +14,7 @@ use Sentry\DataCollection\KeyValueCollectionBehavior;
 use Yii;
 use yii\base\Action;
 use yii\base\InvalidConfigException;
+use yii\db\Connection;
 use yii\db\IntegrityException;
 use yii\web\Application;
 use yii\web\Controller;
@@ -391,6 +392,24 @@ final class PersonalDataTest extends TestCase
         $this->assertStringNotContainsString('ann@example.com', $value);
         $this->assertStringContainsString('Key (email)=(?) already exists.', $value);
         $this->assertStringContainsString('"user_email_key"', $value, 'Identifiers are kept.');
+    }
+
+    public function testStringsInDoubleQuotesAreMaskedInMysqlErrors(): void
+    {
+        $app = $this->createWebApp([], [], [
+            'db' => ['class' => Connection::class, 'dsn' => 'mysql:host=db;dbname=app'],
+        ]);
+        $exception = new IntegrityException(
+            "SQLSTATE[23000]: Integrity constraint violation: 1062 Duplicate entry 'ann@example.com' for key 'email'\n"
+            . 'The SQL being executed was: INSERT INTO `user` (`email`, `note`) VALUES ("ann@example.com", "hunter2")'
+        );
+
+        $app->get('sentry')->getHub()->captureException($exception);
+
+        $this->assertSame([
+            "SQLSTATE[23000]: Integrity constraint violation: 1062 Duplicate entry ? for key 'email'\n"
+            . 'The SQL being executed was: INSERT INTO `user` (`email`, `note`) VALUES (?, ?)',
+        ], array_column($this->singleEvent()['exception']['values'] ?? [], 'value'));
     }
 
     public function testDatabaseErrorMaskingCanBeTurnedOff(): void
