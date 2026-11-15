@@ -61,6 +61,12 @@ final class SiteController extends Controller
         }
     }
 
+    public function actionCompileError(): void
+    {
+        // A compile error: PHP stops at once, running only the shutdown functions.
+        eval('function yii2_sentry_web_report() {} function yii2_sentry_web_report() {}');
+    }
+
     public function actionPostLog(): string
     {
         Yii::warning('suspicious thing during POST', 'app');

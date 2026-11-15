@@ -15,6 +15,12 @@ use yii\helpers\FileHelper;
 abstract class ConsoleProcessTestCase extends TestCase
 {
     /**
+     * The exit code of a command that a fatal error ended: 1, which Yii's error handler exits with, except on PHP 7.4,
+     * where the process keeps the fatal error's 255.
+     */
+    protected const FATAL_ERROR_EXIT_CODE = PHP_VERSION_ID < 80000 ? 255 : 1;
+
+    /**
      * @var string the test's directory, with the "queue" directory of the application's file queue
      */
     protected $dir = '';

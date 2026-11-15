@@ -18,7 +18,7 @@ final class ClientSetUpBeforeYiiTest extends ConsoleProcessTestCase
     {
         $command = $this->runCommand(['report/fatal'], '', 'existing_hub');
 
-        $this->assertSame(1, $command['exitCode'], $command['log']);
+        $this->assertSame(self::FATAL_ERROR_EXIT_CODE, $command['exitCode'], $command['log']);
         // The SDK's fatal-error listener reports it as well, before Yii's error handler does.
         $this->assertCount(1, $command['events'], $command['log']);
         $event = $command['events'][0];
@@ -33,7 +33,7 @@ final class ClientSetUpBeforeYiiTest extends ConsoleProcessTestCase
     {
         $command = $this->runCommand(['report/fatal'], '', 'existing_hub_errors_excepted');
 
-        $this->assertSame(1, $command['exitCode'], $command['log']);
+        $this->assertSame(self::FATAL_ERROR_EXIT_CODE, $command['exitCode'], $command['log']);
         $this->assertCount(1, $command['events'], $command['log']);
         $this->assertSame(FatalErrorException::class, $command['events'][0]['exception']['values'][0]['type'] ?? null);
     }

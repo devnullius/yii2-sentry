@@ -45,6 +45,20 @@ final class WebReportingTest extends WebServerTestCase
 
     public function testAFatalErrorIsReportedOnce(): void
     {
+        $response = $this->request('default', 'GET', '/site/compile-error');
+
+        $exceptions = $this->singleEvent($response)['exception']['values'] ?? [];
+        $this->assertStringContainsString('Cannot redeclare', end($exceptions)['value'] ?? '');
+    }
+
+    /**
+     * Before PHP 8.2, the built-in server may end its own process when a request runs out of memory, and so fail the
+     * requests of the tests after this one: PHP 7.4-8.1 from the ondrej/php packages, which GitHub's runners use, do.
+     *
+     * @requires PHP 8.2
+     */
+    public function testRunningOutOfMemoryIsReportedOnce(): void
+    {
         $response = $this->request('default', 'GET', '/site/fatal');
 
         $exceptions = $this->singleEvent($response)['exception']['values'] ?? [];

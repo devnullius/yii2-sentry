@@ -31,7 +31,7 @@ final class CronMonitorCommandTest extends ConsoleProcessTestCase
     {
         $command = $this->runCommand(['report/fatal'], '', 'cron');
 
-        $this->assertSame(1, $command['exitCode'], $command['log']);
+        $this->assertSame(self::FATAL_ERROR_EXIT_CODE, $command['exitCode'], $command['log']);
         $this->assertSame(['in_progress', 'error'], array_column($command['checkIns'], 'status'), $command['log']);
     }
 
