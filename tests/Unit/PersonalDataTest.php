@@ -475,6 +475,27 @@ final class PersonalDataTest extends TestCase
                 'Connection (pgsql:host=replica;password=db-secret) failed: SQLSTATE[08006] [7] connection refused',
                 'Connection (pgsql:host=replica;password=[Filtered PII]) failed: SQLSTATE[08006] [7] connection refused',
             ],
+            // ODBC takes a value in braces as it is, with any ";" in it, and "}}" for a "}".
+            'database connection, a ";" in a password in braces' => [
+                'yii\db\Connection::open',
+                'Opening DB connection: odbc:Driver={ODBC Driver 18 for SQL Server};Server=db;Uid=app;Pwd={db;secret};Encrypt=yes',
+                'Opening DB connection: odbc:Driver={ODBC Driver 18 for SQL Server};Server=db;Uid=app;Pwd=[Filtered PII];Encrypt=yes',
+            ],
+            'failed connection of a pool, a ";" in a password in braces' => [
+                'yii\db\Connection::openFromPoolSequentially',
+                'Connection (odbc:Server=replica;Uid=app;Pwd={db;secret};Encrypt=yes) failed: SQLSTATE[08001] login failed',
+                'Connection (odbc:Server=replica;Uid=app;Pwd=[Filtered PII];Encrypt=yes) failed: SQLSTATE[08001] login failed',
+            ],
+            'failed connection of a pool, a "}" in a password in braces' => [
+                'yii\db\Connection::openFromPoolSequentially',
+                'Connection (odbc:Server=replica;Uid=app;PWD={db}};secret}) failed: SQLSTATE[08001] login failed',
+                'Connection (odbc:Server=replica;Uid=app;PWD=[Filtered PII]) failed: SQLSTATE[08001] login failed',
+            ],
+            'failed connection of a pool, a brace that is not closed' => [
+                'yii\db\Connection::openFromPoolSequentially',
+                'Connection (odbc:Server=replica;Uid=app;Pwd={db;secret) failed: SQLSTATE[08001] login failed',
+                'Connection (odbc:Server=replica;Uid=app;Pwd=[Filtered PII]) failed: SQLSTATE[08001] login failed',
+            ],
             // yii2-queue's LogBehavior: the exception and its stack trace, here of a job a worker ran in a process of
             // its own, with everything that process printed.
             'failed queue job' => [

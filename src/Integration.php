@@ -576,8 +576,10 @@ class Integration implements IntegrationInterface
 
         if (strpos($category, 'yii\\db\\Connection::') === 0 && $this->scrubSecrets) {
             // E.g. "Opening DB connection: pgsql:host=db;dbname=app;password=secret", and the warning about a
-            // connection of a pool that failed: "Connection (pgsql:host=replica;password=secret) failed: ..."
-            return $replace('/((?:^|[;:])\s*(?:password|pwd)\s*=).*?(?=;|\) failed: |$)/i', static function (array $match) use ($replacement): string {
+            // connection of a pool that failed: "Connection (pgsql:host=replica;password=secret) failed: ...". ODBC
+            // takes a value in braces as it is, with any ";" in it and "}}" for a "}", e.g. "Pwd={pa;ss}"; a brace
+            // that is not closed is left out up to the end of the DSN.
+            return $replace('/((?:^|[;:])\s*(?:password|pwd)\s*=)(?:\s*\{(?:(?!\) failed: )[^}]|\}\})*\}?)?.*?(?=;|\) failed: |$)/i', static function (array $match) use ($replacement): string {
                 return $match[1] . $replacement;
             }, $text);
         }
