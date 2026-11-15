@@ -311,8 +311,10 @@ collect user info (`user_info`), which also decides whether the user ID is attac
 The SDK leaves out the cookies named like its own list of words ("session", "sid", "csrf", "identity", …), which
 misses a session cookie named, say, `advanced-frontend`, as in Yii's advanced application template. The component adds
 the names your application gives Yii's session, CSRF and identity cookies to that list (the `cookies` setting's
-`terms`), unless the setting only lets listed cookies through. On a client you set up yourself, or with the option
-given as a `DataCollectionOptions` object, add them by hand:
+`terms`), unless the setting only lets listed cookies through. It reads the names from the components' configuration
+when Sentry starts, or from the components that exist by then, so add a name by hand when it is set elsewhere, e.g.
+by a closure that creates the session component. Add them all by hand on a client you set up yourself, or with the
+option given as a `DataCollectionOptions` object:
 
 ```php
 'data_collection' => [
