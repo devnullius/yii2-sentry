@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
-## [5.0.0] - Unreleased
+## [5.0.0] - 2026-11-15
 
 5.0 changes how errors and log messages become Sentry events, keeps secrets and personal data out of events by
 default, and adds tracing, yii2-queue jobs, cron monitoring and Sentry Logs. [UPGRADE-5.0.md](UPGRADE-5.0.md) lists what
