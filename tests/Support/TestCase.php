@@ -6,8 +6,11 @@ namespace devnullius\yii2\sentry\tests\Support;
 
 use devnullius\yii2\sentry\Component;
 use devnullius\yii2\sentry\Integration;
+use devnullius\yii2\sentry\tests\Fixtures\Console\HelloController;
 use Yii;
+use yii\console\Application as ConsoleApplication;
 use yii\web\Application;
+use yii\web\Response;
 
 /**
  * Base for in-process tests. Builds a Yii web application (in CLI, with the request marked as a web request) whose
@@ -46,17 +49,7 @@ abstract class TestCase extends \PHPUnit\Framework\TestCase
             'REMOTE_ADDR' => '203.0.113.10',
         ], $server);
 
-        $this->transport = new RecordingTransport();
-
-        $sentrySettings = $sentry['sentrySettings'] ?? [];
-        unset($sentry['sentrySettings']);
-        $sentryConfig = array_merge([
-            'class' => Component::class,
-            'dsn' => 'https://public@sentry.example.com/1',
-            // No SDK error listeners in-process: they would install global handlers inside PHPUnit.
-            'integrations' => [Integration::class],
-        ], $sentry);
-        $sentryConfig['sentrySettings'] = array_merge(['transport' => $this->transport], $sentrySettings);
+        $sentryConfig = $this->sentryConfig($sentry);
 
         $request = array_merge([
             'cookieValidationKey' => 'test',
@@ -71,6 +64,7 @@ abstract class TestCase extends \PHPUnit\Framework\TestCase
             'basePath' => dirname(__DIR__) . '/Fixtures/WebApp',
             'vendorPath' => dirname(__DIR__, 2) . '/vendor',
             'runtimePath' => sys_get_temp_dir(),
+            'controllerNamespace' => 'devnullius\\yii2\\sentry\\tests\\Fixtures\\WebApp\\controllers',
             'bootstrap' => ['sentry'],
             'components' => array_merge([
                 'request' => $request,
@@ -81,6 +75,25 @@ abstract class TestCase extends \PHPUnit\Framework\TestCase
         $app->getRequest()->setIsConsoleRequest(false);
 
         return $app;
+    }
+
+    /**
+     * Builds a console application with the fixture "hello" command, like createWebApp() does for the web.
+     *
+     * @param array<string, mixed> $sentry     component config overrides, as for createWebApp()
+     * @param array<string, mixed> $components extra components
+     */
+    protected function createConsoleApp(array $sentry = [], array $components = []): ConsoleApplication
+    {
+        return new ConsoleApplication([
+            'id' => 'console-test',
+            'basePath' => dirname(__DIR__) . '/Fixtures/Console',
+            'vendorPath' => dirname(__DIR__, 2) . '/vendor',
+            'runtimePath' => sys_get_temp_dir(),
+            'controllerMap' => ['hello' => HelloController::class],
+            'bootstrap' => ['sentry'],
+            'components' => array_merge(['sentry' => $this->sentryConfig($sentry)], $components),
+        ]);
     }
 
     /**
@@ -102,6 +115,48 @@ abstract class TestCase extends \PHPUnit\Framework\TestCase
     }
 
     /**
+     * @return list<array<string, mixed>> the transactions sent to Sentry
+     */
+    protected function transactions(): array
+    {
+        return RecordingTransport::onlyType($this->transport->payloads, 'transaction');
+    }
+
+    /**
+     * Ends the request the way Yii does once the response has been sent.
+     *
+     * @return array<string, mixed> the request's transaction
+     */
+    protected function finishRequest(Application $app, int $statusCode): array
+    {
+        $response = $app->getResponse();
+        $response->setStatusCode($statusCode);
+        $response->trigger(Response::EVENT_AFTER_SEND);
+
+        $transactions = $this->transactions();
+        $this->assertCount(1, $transactions, 'Expected exactly one transaction to be sent to Sentry.');
+
+        return $transactions[0];
+    }
+
+    /**
+     * @param array<string, mixed> $transaction
+     *
+     * @return list<array<string, mixed>> the transaction's spans with the given operation, in order
+     */
+    protected function spans(array $transaction, string $op): array
+    {
+        $spans = array_values(array_filter($transaction['spans'] ?? [], static function (array $span) use ($op): bool {
+            return ($span['op'] ?? null) === $op;
+        }));
+        usort($spans, static function (array $a, array $b): int {
+            return $a['start_timestamp'] <=> $b['start_timestamp'];
+        });
+
+        return $spans;
+    }
+
+    /**
      * @return array<string, mixed>
      */
     protected function singleEvent(): array
@@ -110,5 +165,27 @@ abstract class TestCase extends \PHPUnit\Framework\TestCase
         $this->assertCount(1, $events, 'Expected exactly one event to be sent to Sentry.');
 
         return $events[0];
+    }
+
+    /**
+     * @param array<string, mixed> $sentry
+     *
+     * @return array<string, mixed> the Sentry component's config, recording into a new transport
+     */
+    private function sentryConfig(array $sentry): array
+    {
+        $this->transport = new RecordingTransport();
+
+        $sentrySettings = $sentry['sentrySettings'] ?? [];
+        unset($sentry['sentrySettings']);
+        $sentryConfig = array_merge([
+            'class' => Component::class,
+            'dsn' => 'https://public@sentry.example.com/1',
+            // No SDK error listeners in-process: they would install global handlers inside PHPUnit.
+            'integrations' => [Integration::class],
+        ], $sentry);
+        $sentryConfig['sentrySettings'] = array_merge(['transport' => $this->transport], $sentrySettings);
+
+        return $sentryConfig;
     }
 }

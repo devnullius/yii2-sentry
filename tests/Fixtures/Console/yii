@@ -1,0 +1,40 @@
+<?php
+
+declare(strict_types=1);
+
+// Console entry script for the end-to-end tests: a real yii2-queue worker and the child process it starts for each job
+// with this same script (tests/Worker), and commands as cron runs them (tests/Console). Every process records what the
+// SDK would send to the file named by SENTRY_TEST_OUT_FILE.
+
+// Like php.ini-production: deprecations are not reported.
+error_reporting(E_ALL & ~E_DEPRECATED & ~E_USER_DEPRECATED);
+// Unlike php.ini-production, like PHP without a php.ini (e.g. in Docker images): stack traces hold the arguments of
+// every call, which must not carry a job's data to Sentry.
+ini_set('zend.exception_ignore_args', '0');
+
+define('YII_DEBUG', false);
+define('YII_ENV', 'prod');
+
+require dirname(__DIR__, 3) . '/vendor/autoload.php';
+
+$scenario = (string)(getenv('SENTRY_TEST_SCENARIO') ?: 'default');
+if (strpos($scenario, 'existing_hub') === 0) {
+    // Like an application that sets up Sentry right after Composer's autoloader, before Yii exists: with the SDK's
+    // default integrations, its own error, exception and fatal-error listeners included.
+    \Sentry\init([
+        'dsn' => 'https://public@sentry.example.com/1',
+        'transport' => new devnullius\yii2\sentry\tests\Support\RecordingTransport((string)getenv('SENTRY_TEST_OUT_FILE')),
+    ]);
+}
+
+require dirname(__DIR__, 3) . '/vendor/yiisoft/yii2/Yii.php';
+
+$config = require __DIR__ . '/config.php';
+
+$application = new yii\console\Application($config(
+    $scenario,
+    (string)getenv('SENTRY_TEST_OUT_FILE'),
+    (string)getenv('SENTRY_TEST_QUEUE_PATH')
+));
+
+exit($application->run());

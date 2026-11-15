@@ -21,14 +21,68 @@ final class WebReportingTest extends WebServerTestCase
         $this->assertSame(200, $response['status'], $response['body']);
     }
 
-    public function testPostRequestsKeepTheLogContextInExtras(): void
+    public function testPostRequestsIncludeTheParsedBody(): void
     {
         $response = $this->request('default', 'POST', '/site/post-log', self::FORM, 'username=alice');
 
-        $extra = $this->singleEvent($response)['extra'] ?? [];
-        foreach (['logs', 'traces', 'real_body', 'real_time', 'decodedParams'] as $key) {
-            $this->assertArrayHasKey($key, $extra, "extra.$key is missing");
-        }
+        $this->assertSame(['username' => 'alice'], $this->singleEvent($response)['request']['data'] ?? null);
+    }
+
+    public function testEachLoggedErrorIsItsOwnEvent(): void
+    {
+        $response = $this->request('default', 'GET', '/site/log-two');
+
+        $this->assertSame(['first distinct problem', 'second distinct problem'], array_column($response['events'], 'message'));
+    }
+
+    public function testAPhpWarningIsReportedOnce(): void
+    {
+        $response = $this->request('default', 'GET', '/site/warning');
+
+        $exceptions = $this->singleEvent($response)['exception']['values'] ?? [];
+        $this->assertSame('yii\base\ErrorException', end($exceptions)['type'] ?? null);
+    }
+
+    public function testAFatalErrorIsReportedOnce(): void
+    {
+        $response = $this->request('default', 'GET', '/site/compile-error');
+
+        $exceptions = $this->singleEvent($response)['exception']['values'] ?? [];
+        $this->assertStringContainsString('Cannot redeclare', end($exceptions)['value'] ?? '');
+    }
+
+    /**
+     * Before PHP 8.2, the built-in server may end its own process when a request runs out of memory, and so fail the
+     * requests of the tests after this one: PHP 7.4-8.1 from the ondrej/php packages, which GitHub's runners use, do.
+     *
+     * @requires PHP 8.2
+     */
+    public function testRunningOutOfMemoryIsReportedOnce(): void
+    {
+        $response = $this->request('default', 'GET', '/site/fatal');
+
+        $exceptions = $this->singleEvent($response)['exception']['values'] ?? [];
+        $this->assertStringContainsString('Allowed memory size', end($exceptions)['value'] ?? '');
+    }
+
+    public function testAnUncaughtExceptionIsMarkedUnhandled(): void
+    {
+        $response = $this->request('default', 'GET', '/site/throw');
+
+        $exceptions = $this->singleEvent($response)['exception']['values'] ?? [];
+        $this->assertFalse(end($exceptions)['mechanism']['handled'] ?? null);
+    }
+
+    public function testWithSendDefaultPiiAUserRestoredFromTheSessionIsAttached(): void
+    {
+        $login = $this->request('pii_on', 'GET', '/site/login');
+        $this->assertNotNull($login['sessionCookie']);
+
+        // Identity restored from the session: Yii does not trigger its login event on this request.
+        $response = $this->request('pii_on', 'GET', '/site/warn-then-throw', ['Cookie: ' . $login['sessionCookie']]);
+
+        $crash = $response['events'][count($response['events']) - 1] ?? [];
+        $this->assertSame(42, $crash['user']['id'] ?? null);
     }
 
     public function testExceptionsAreTaggedWithTheRouteThatFailed(): void
@@ -55,11 +109,54 @@ final class WebReportingTest extends WebServerTestCase
 
         $response = $this->request('default', 'GET', '/site/warn-then-throw', ['Cookie: ' . $login['sessionCookie']]);
 
-        $logs = implode("\n", (array)($this->singleEvent($response)['extra']['logs'] ?? []));
-        $this->assertStringContainsString('minor issue before the crash', $logs);
-        $this->assertStringNotContainsString($sessionId, $logs, 'A session ID in Sentry allows session hijacking.');
-        $this->assertStringNotContainsString('127.0.0.1', $logs);
-        $this->assertStringNotContainsString('[42]', $logs);
+        // The warning is an event of its own and a breadcrumb of the crash that follows it.
+        $this->assertCount(2, $response['events']);
+        $crash = $response['events'][1];
+        $breadcrumbs = (string)json_encode($crash['breadcrumbs']['values'] ?? []);
+        $this->assertStringContainsString('minor issue before the crash', $breadcrumbs);
+        $this->assertStringNotContainsString('127.0.0.1', $breadcrumbs);
+        $this->assertStringNotContainsString('[42]', $breadcrumbs);
+        $this->assertStringNotContainsString($sessionId, (string)json_encode($response['events']), 'A session ID in Sentry allows session hijacking.');
+    }
+
+    public function testARequestIsOneTransactionWithItsQueries(): void
+    {
+        $response = $this->request('tracing', 'GET', '/site/query');
+
+        $this->assertSame(200, $response['status'], $response['body']);
+        $this->assertCount(1, $response['transactions']);
+        $transaction = $response['transactions'][0];
+        $this->assertSame('site/query', $transaction['transaction'] ?? null);
+        $this->assertSame('ok', $transaction['contexts']['trace']['status'] ?? null);
+        $queries = array_values(array_filter($transaction['spans'] ?? [], static function (array $span): bool {
+            return ($span['op'] ?? null) === 'db.sql.query';
+        }));
+        $this->assertSame(['SELECT ? AS email'], array_column($queries, 'description'));
+    }
+
+    public function testAFailedRequestIsAFailedTransactionLinkedToItsError(): void
+    {
+        $response = $this->request('tracing', 'GET', '/site/throw');
+
+        $this->assertSame(500, $response['status']);
+        $this->assertCount(1, $response['transactions']);
+        $transaction = $response['transactions'][0];
+        $this->assertSame('site/throw', $transaction['transaction'] ?? null);
+        $this->assertSame('internal_error', $transaction['contexts']['trace']['status'] ?? null);
+        // The error is sent when the log is flushed at the end, after the transaction.
+        $event = $this->singleEvent($response);
+        $this->assertSame($transaction['contexts']['trace']['trace_id'] ?? null, $event['contexts']['trace']['trace_id'] ?? null);
+        $this->assertSame('site/throw', $event['transaction'] ?? null);
+    }
+
+    public function testAPageThatDoesNotExistIsNamedByItsPath(): void
+    {
+        $response = $this->request('tracing', 'GET', '/no/such/page');
+
+        $this->assertSame(404, $response['status']);
+        $transaction = $response['transactions'][0] ?? [];
+        $this->assertSame('/no/such/page', $transaction['transaction'] ?? null);
+        $this->assertSame('not_found', $transaction['contexts']['trace']['status'] ?? null);
     }
 
     public function testSendDefaultPiiWithTracingKeepsServingAndReporting(): void
@@ -135,10 +232,56 @@ final class WebReportingTest extends WebServerTestCase
     public function testTheBodyIsLeftOutWhenNoRouteRuleCanBeApplied(): void
     {
         // The request fails before routing, so the piiBodyFields rules for site/post-log can't be matched.
-        $response = $this->request('api_pii', 'POST', '/site/post-log', self::FORM, 'username=alice&password=hunter2');
+        $response = $this->request('api_pii', 'POST', '/site/post-log', self::FORM, 'username=alice&nickname=annie');
 
         $this->assertSame(500, $response['status']);
-        $this->assertStringNotContainsString('hunter2', (string)json_encode($this->singleEvent($response)));
+        $this->assertStringNotContainsString('annie', (string)json_encode($this->singleEvent($response)));
+    }
+
+    public function testTheBodyOfARequestWhoseMethodIsNotListedIsNotSent(): void
+    {
+        // httpMethodsWithRequestBody lists POST, PUT and PATCH: the SDK's RequestIntegration must not send the body of
+        // another method instead, unscrubbed. "nickname" is neither a secret nor personal data by name.
+        $response = $this->request('default', 'DELETE', '/site/post-log', self::FORM, 'username=alice&nickname=annie');
+
+        $event = $this->singleEvent($response);
+        $this->assertSame('[not sent: DELETE is not in httpMethodsWithRequestBody]', $event['request']['data'] ?? null);
+        $this->assertStringNotContainsString('annie', (string)json_encode($event));
+    }
+
+    public function testTheBodyOfAMethodLeftOutOfHttpMethodsWithRequestBodyIsNotSent(): void
+    {
+        $response = $this->request('post_bodies_only', 'PUT', '/site/post-log', ['Content-Type: application/json'], '{"username":"alice","nickname":"annie"}');
+
+        $this->assertStringNotContainsString('annie', (string)json_encode($this->singleEvent($response)));
+    }
+
+    public function testAClientCannotGetABodySentByOverridingTheMethod(): void
+    {
+        // Yii takes the method from the X-Http-Method-Override header: a POST marked as DELETE is not a listed method.
+        $response = $this->request('default', 'POST', '/site/post-log', array_merge(self::FORM, ['X-Http-Method-Override: DELETE']), 'username=alice&nickname=annie');
+
+        $event = $this->singleEvent($response);
+        $this->assertSame('[not sent: DELETE is not in httpMethodsWithRequestBody]', $event['request']['data'] ?? null);
+        $this->assertStringNotContainsString('annie', (string)json_encode($event));
+    }
+
+    /**
+     * @return array<string, array{0: string}>
+     */
+    public static function methodsOfRequestsWithoutABody(): array
+    {
+        return ['GET' => ['GET'], 'DELETE' => ['DELETE']];
+    }
+
+    /**
+     * @dataProvider methodsOfRequestsWithoutABody
+     */
+    public function testARequestWithoutABodyGetsNoBodyData(string $method): void
+    {
+        $response = $this->request('default', $method, '/site/log-error');
+
+        $this->assertArrayNotHasKey('data', $this->singleEvent($response)['request'] ?? []);
     }
 
     public function testTheSdkDataCollectionPolicyIsHonored(): void
@@ -146,6 +289,27 @@ final class WebReportingTest extends WebServerTestCase
         $response = $this->request('data_collection', 'POST', '/site/post-log', self::FORM, 'username=alice&password=hunter2');
 
         $this->assertStringNotContainsString('hunter2', (string)json_encode($this->singleEvent($response)));
+    }
+
+    public function testWithTheDataCollectionOptionYiisSessionCookieIsLeftOutUnderTheNameTheApplicationGivesIt(): void
+    {
+        $response = $this->request('data_collection_cookies', 'GET', '/site/log-error', ['Cookie: advanced-frontend=s3ss10n-1d; theme=dark; lang=hy']);
+
+        $sent = (string)json_encode($this->singleEvent($response));
+        $this->assertStringNotContainsString('s3ss10n-1d', $sent, 'A session ID in Sentry allows session hijacking.');
+        // The application's own terms are kept, and the other cookies collected.
+        $this->assertStringNotContainsString('dark', $sent);
+        $this->assertStringContainsString('hy', (string)json_encode($this->singleEvent($response)['request']['cookies'] ?? null));
+    }
+
+    public function testATracedRequestsTransactionCarriesNoRequestBody(): void
+    {
+        $response = $this->request('tracing', 'POST', '/site/post-log', self::FORM, 'username=alice&password=hunter2');
+
+        $this->assertCount(1, $response['transactions'], $response['appLog']);
+        $transaction = $response['transactions'][0];
+        $this->assertArrayNotHasKey('data', $transaction['request'] ?? []);
+        $this->assertStringNotContainsString('hunter2', (string)json_encode($transaction));
     }
 
     public function testTheDataCollectionPolicyOfAReusedClientIsHonored(): void
@@ -160,6 +324,49 @@ final class WebReportingTest extends WebServerTestCase
         $response = $this->request('existing_hub_pii', 'GET', '/site/log-error', ['X-Forwarded-For: 198.51.100.23']);
 
         $this->assertSame('198.51.100.23', $this->singleEvent($response)['user']['ip_address'] ?? null);
+    }
+
+    public function testALoginFormSendsNeitherThePasswordNorTheEmail(): void
+    {
+        $response = $this->request('default', 'POST', '/site/post-log', self::FORM, http_build_query([
+            'LoginForm' => ['email' => 'ann@example.com', 'password' => 'hunter2', 'rememberMe' => '1'],
+        ]));
+
+        $event = (string)json_encode($this->singleEvent($response));
+        $this->assertStringNotContainsString('hunter2', $event);
+        $this->assertStringNotContainsString('ann@example.com', $event);
+        $this->assertStringContainsString('rememberMe', $event, 'Other fields are still sent.');
+    }
+
+    public function testWithSendDefaultPiiTheSessionCookieIsStillScrubbed(): void
+    {
+        $login = $this->request('pii_on', 'GET', '/site/login');
+        $this->assertNotNull($login['sessionCookie']);
+        $sessionId = substr((string)$login['sessionCookie'], strlen('PHPSESSID='));
+
+        $response = $this->request('pii_on', 'GET', '/site/log-error', ['Cookie: theme=dark; ' . $login['sessionCookie']]);
+
+        $event = $this->singleEvent($response);
+        $this->assertStringNotContainsString($sessionId, (string)json_encode($event), 'A session ID in Sentry allows session hijacking.');
+        $this->assertSame('dark', $event['request']['cookies']['theme'] ?? null, 'Other cookies are still sent.');
+    }
+
+    public function testAMultipartFormIsScrubbedToo(): void
+    {
+        // PHP reads a multipart body into $_POST itself. Up to 4.1, the SDK then added the fields unfiltered.
+        $boundary = 'test-boundary';
+        $body = '';
+        foreach (['LoginForm[email]' => 'ann@example.com', 'LoginForm[password]' => 'hunter2', 'LoginForm[rememberMe]' => '1'] as $name => $value) {
+            $body .= "--$boundary\r\nContent-Disposition: form-data; name=\"$name\"\r\n\r\n$value\r\n";
+        }
+        $body .= "--$boundary--\r\n";
+
+        $response = $this->request('default', 'POST', '/site/post-log', ["Content-Type: multipart/form-data; boundary=$boundary"], $body);
+
+        $this->assertSame(
+            ['LoginForm' => ['email' => '[Filtered PII]', 'password' => '[Filtered PII]', 'rememberMe' => '1']],
+            $this->singleEvent($response)['request']['data'] ?? null
+        );
     }
 
     public function testProxyHeadersAreFilteredByDefault(): void

@@ -61,6 +61,21 @@ final class RecordingTransport implements TransportInterface
     }
 
     /**
+     * @return list<array<string, mixed>> the entries of all Sentry Logs batches, in order
+     */
+    public function logs(): array
+    {
+        $entries = [];
+        foreach (self::onlyType($this->payloads, 'log') as $batch) {
+            foreach ($batch['items'] ?? [] as $entry) {
+                $entries[] = $entry;
+            }
+        }
+
+        return $entries;
+    }
+
+    /**
      * @return array<string, mixed> the event payload, plus its envelope item type under "_type"
      */
     public static function serialize(Event $event): array

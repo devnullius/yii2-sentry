@@ -16,5 +16,13 @@
         <testsuite name="Web">
             <directory>tests/Web</directory>
         </testsuite>
+        <!-- End-to-end tests: a real yii2-queue worker, running every job in a child process of its own. -->
+        <testsuite name="Worker">
+            <directory>tests/Worker</directory>
+        </testsuite>
+        <!-- End-to-end tests: real console commands, each in a process of its own, as cron runs them. -->
+        <testsuite name="Console">
+            <directory>tests/Console</directory>
+        </testsuite>
     </testsuites>
 </phpunit>

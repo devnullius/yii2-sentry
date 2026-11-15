@@ -37,6 +37,36 @@ final class SiteController extends Controller
         throw new RuntimeException('boom from site/throw');
     }
 
+    public function actionLogTwo(): string
+    {
+        Yii::error('first distinct problem', 'app');
+        Yii::error('second distinct problem', 'app');
+
+        return 'logged two';
+    }
+
+    public function actionWarning(): string
+    {
+        $values = [];
+
+        return 'value: ' . $values['missing']; // PHP 8: E_WARNING "Undefined array key"
+    }
+
+    public function actionFatal(): void
+    {
+        ini_set('memory_limit', '64M');
+        $chunks = [];
+        while (true) {
+            $chunks[] = str_repeat('x', 1024 * 1024);
+        }
+    }
+
+    public function actionCompileError(): void
+    {
+        // A compile error: PHP stops at once, running only the shutdown functions.
+        eval('function yii2_sentry_web_report() {} function yii2_sentry_web_report() {}');
+    }
+
     public function actionPostLog(): string
     {
         Yii::warning('suspicious thing during POST', 'app');
@@ -57,6 +87,16 @@ final class SiteController extends Controller
         Yii::warning('minor issue before the crash', 'app');
 
         throw new RuntimeException('crash for user ' . var_export($id, true));
+    }
+
+    public function actionRender(): string
+    {
+        return $this->renderPartial('hello', ['name' => 'Ann']);
+    }
+
+    public function actionQuery(): string
+    {
+        return (string)Yii::$app->getDb()->createCommand('SELECT :email AS email', [':email' => 'ann@example.com'])->queryScalar();
     }
 
     public function actionOuter(): string

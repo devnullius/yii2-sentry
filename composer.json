@@ -44,16 +44,19 @@
     },
     "require": {
         "php": "^7.4 || ^8.0",
-        "sentry/sentry": "^4.33",
+        "sentry/sentry": "^4.33.2",
         "yiisoft/yii2": "^2.0.55"
     },
     "require-dev": {
         "phpstan/phpstan": "^2.1",
         "phpunit/phpunit": "^9.6.38",
-        "yiisoft/yii2-httpclient": "^2.0.15"
+        "yiisoft/yii2-httpclient": "^2.0.15",
+        "yiisoft/yii2-queue": "^2.3.8"
     },
     "suggest": {
-        "yiisoft/yii2-httpclient": "Records outgoing yii2-httpclient requests when performance tracing is enabled"
+        "ext-excimer": "Lets the Sentry SDK profile the requests, commands and queue jobs that are traced",
+        "yiisoft/yii2-httpclient": "Adds a breadcrumb for every outgoing HTTP call, passes the trace on to the services called, and traces each call",
+        "yiisoft/yii2-queue": "Reports failed queue jobs with their details, and traces each job"
     },
     "autoload": {
         "psr-4": {
@@ -68,6 +71,11 @@
     "scripts": {
         "test": "phpunit",
         "analyse": "phpstan analyse --memory-limit=1G"
+    },
+    "extra": {
+        "branch-alias": {
+            "dev-master": "5.x-dev"
+        }
     },
     "repositories": [
         {

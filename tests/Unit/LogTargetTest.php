@@ -8,7 +8,11 @@ use devnullius\yii2\sentry\LogTarget;
 use devnullius\yii2\sentry\tests\Support\ActiveSession;
 use devnullius\yii2\sentry\tests\Support\Identity;
 use devnullius\yii2\sentry\tests\Support\TestCase;
+use RuntimeException;
 use Yii;
+use yii\db\Connection;
+use yii\log\Logger;
+use yii\web\Application;
 
 /**
  * @runTestsInSeparateProcesses
@@ -16,11 +20,384 @@ use Yii;
  */
 final class LogTargetTest extends TestCase
 {
-    public function testLogLinesDoNotContainTheClientIpUserIdOrSessionIdByDefault(): void
+    // --- Events -------------------------------------------------------------------------------------------------
+
+    public function testEachLoggedErrorAndWarningBecomesItsOwnEvent(): void
     {
         $this->appWithLogTarget();
 
-        $logs = $this->exportTwoMessages();
+        Yii::error('first problem', 'app');
+        Yii::warning('second problem', 'app');
+        Yii::error('third problem', 'app');
+        Yii::getLogger()->flush(true);
+
+        $events = $this->transport->events();
+        $this->assertSame(['first problem', 'second problem', 'third problem'], array_column($events, 'message'));
+        $this->assertSame(['error', 'warning', 'error'], array_column($events, 'level'));
+    }
+
+    public function testOnlyErrorsAndWarningsBecomeEventsByDefault(): void
+    {
+        $this->appWithLogTarget(); // no "levels" configured: for Yii alone that would mean every level
+
+        Yii::info('just information', 'app');
+        Yii::getLogger()->flush(true);
+
+        $this->assertSame([], $this->transport->events(), 'An info message must not become an event.');
+    }
+
+    public function testTheEventTimeIsWhenTheMessageWasLogged(): void
+    {
+        $this->appWithLogTarget();
+
+        // Logs are exported in a batch, possibly much later than they were written.
+        Yii::getLogger()->messages[] = ['logged a while ago', Logger::LEVEL_ERROR, 'app', 1700000000.25, [], 0];
+        Yii::getLogger()->flush(true);
+
+        $this->assertEqualsWithDelta(1700000000.25, $this->singleEvent()['timestamp'] ?? 0, 0.001);
+    }
+
+    public function testAnExceptionThatReachedTheErrorHandlerIsUnhandled(): void
+    {
+        $app = $this->appWithLogTarget();
+        $exception = new RuntimeException('crash');
+        $app->getErrorHandler()->exception = $exception; // what Yii does before logging an uncaught exception
+
+        Yii::error($exception, 'RuntimeException');
+        Yii::getLogger()->flush(true);
+
+        $this->assertFalse($this->lastException($this->singleEvent())['mechanism']['handled'] ?? null);
+    }
+
+    public function testAnExceptionLoggedByTheApplicationStaysHandled(): void
+    {
+        $this->appWithLogTarget();
+
+        Yii::error(new RuntimeException('caught and logged'), 'app');
+        Yii::getLogger()->flush(true);
+
+        $this->assertTrue($this->lastException($this->singleEvent())['mechanism']['handled'] ?? null);
+    }
+
+    public function testAnExceptionLoggedAsAWarningIsAWarning(): void
+    {
+        $this->appWithLogTarget();
+
+        Yii::warning(new RuntimeException('minor'), 'app');
+        Yii::getLogger()->flush(true);
+
+        $this->assertSame('warning', $this->singleEvent()['level'] ?? null);
+    }
+
+    public function testTheLogCategoryIsTheEventsLogger(): void
+    {
+        $this->appWithLogTarget();
+
+        Yii::error('payment failed', 'payments');
+        Yii::getLogger()->flush(true);
+
+        $this->assertSame('payments', $this->singleEvent()['logger'] ?? null);
+    }
+
+    public function testTheLoggerNameCanBeTurnedOff(): void
+    {
+        $this->appWithLogTarget(['categoryAsLogger' => false]);
+
+        Yii::error('payment failed', 'payments');
+        Yii::getLogger()->flush(true);
+
+        $this->assertArrayNotHasKey('logger', $this->singleEvent());
+    }
+
+    public function testYiiLogTracesBecomeTheEventsStackTrace(): void
+    {
+        $this->appWithLogTarget();
+        Yii::getLogger()->traceLevel = 3;
+
+        $this->logAnError();
+        Yii::getLogger()->flush(true);
+
+        $files = array_map('basename', array_column($this->singleEvent()['stacktrace']['frames'] ?? [], 'filename'));
+        $this->assertContains('LogTargetTest.php', $files);
+    }
+
+    public function testStackTracesFromLogTracesCanBeTurnedOff(): void
+    {
+        $this->appWithLogTarget(['stackTraces' => false]);
+        Yii::getLogger()->traceLevel = 3;
+
+        $this->logAnError();
+        Yii::getLogger()->flush(true);
+
+        $this->assertArrayNotHasKey('stacktrace', $this->singleEvent());
+    }
+
+    // --- Breadcrumbs --------------------------------------------------------------------------------------------
+
+    public function testEarlierLogMessagesAreAttachedAsBreadcrumbs(): void
+    {
+        $this->appWithLogTarget();
+
+        Yii::info('user opened the cart', 'app');
+        Yii::warning('coupon expired', 'app');
+        Yii::error('payment failed', 'payments');
+        Yii::getLogger()->flush(true);
+
+        [$warning, $error] = $this->transport->events();
+        $this->assertSame([['info', 'app', 'user opened the cart']], $this->breadcrumbs($warning));
+        $this->assertSame(
+            [['info', 'app', 'user opened the cart'], ['warning', 'app', 'coupon expired']],
+            $this->breadcrumbs($error)
+        );
+    }
+
+    public function testBreadcrumbsCanBeTurnedOff(): void
+    {
+        $this->appWithLogTarget(['breadcrumbs' => false]);
+
+        Yii::info('user opened the cart', 'app');
+        Yii::error('payment failed', 'app');
+        Yii::getLogger()->flush(true);
+
+        $this->assertSame([], $this->breadcrumbs($this->singleEvent()));
+    }
+
+    public function testProfilingMarkersAreLeftOutOfBreadcrumbsByDefault(): void
+    {
+        $this->appWithLogTarget();
+
+        Yii::beginProfile('render invoice', 'app');
+        Yii::endProfile('render invoice', 'app');
+        Yii::error('payment failed', 'app');
+        Yii::getLogger()->flush(true);
+
+        $this->assertSame([], $this->breadcrumbs($this->singleEvent()));
+    }
+
+    public function testProfilingMarkersCanBeBreadcrumbs(): void
+    {
+        $this->appWithLogTarget(['breadcrumbLevels' => ['error', 'warning', 'info', 'trace', 'profile']]);
+
+        Yii::beginProfile('render invoice', 'app');
+        Yii::endProfile('render invoice', 'app');
+        Yii::error('payment failed', 'app');
+        Yii::getLogger()->flush(true);
+
+        $this->assertSame(['render invoice', 'render invoice'], array_column($this->breadcrumbs($this->singleEvent()), 2));
+    }
+
+    public function testSqlLogLinesAreQueryBreadcrumbsWithTheirValuesMasked(): void
+    {
+        $this->appWithLogTarget();
+
+        Yii::info("SELECT * FROM `user` WHERE `email`='ann@example.com' AND `id`=42", 'yii\db\Command::query');
+        Yii::info("UPDATE \"order\" SET \"note\"='it''s paid', \"total\"=19.90 WHERE \"id\" IN (7, 8)", 'yii\db\Command::execute');
+        Yii::error('payment failed', 'app');
+        Yii::getLogger()->flush(true);
+
+        $this->assertSame([
+            ['info', 'db.sql.query', 'SELECT * FROM `user` WHERE `email`=? AND `id`=?'],
+            ['info', 'db.sql.query', 'UPDATE "order" SET "note"=?, "total"=? WHERE "id" IN (?, ?)'],
+        ], $this->breadcrumbs($this->singleEvent()));
+    }
+
+    public function testSqlValuesCanBeKept(): void
+    {
+        $this->appWithLogTarget(['maskSqlValues' => false]);
+        $sql = "SELECT * FROM `user` WHERE `email`='ann@example.com'";
+
+        Yii::info($sql, 'yii\db\Command::query');
+        Yii::error('payment failed', 'app');
+        Yii::getLogger()->flush(true);
+
+        $this->assertSame([['info', 'db.sql.query', $sql]], $this->breadcrumbs($this->singleEvent()));
+    }
+
+    /**
+     * Strings are masked as the database of the application's `db` connection writes them.
+     *
+     * @return array<string, array{0: string, 1: string, 2: string}> the connection's DSN, a statement, and the
+     *                                                                 statement as it is sent
+     */
+    public static function sqlStrings(): array
+    {
+        return [
+            // PostgreSQL's dollar-quoted strings may hold any quote, and "$1" is a parameter.
+            'dollar-quoted string' => [
+                'pgsql:host=db;dbname=app',
+                'SELECT $$hunter2$$ AS "note" FROM "user" WHERE "id" = $1',
+                'SELECT ? AS "note" FROM "user" WHERE "id" = $1',
+            ],
+            'tagged dollar-quoted string' => [
+                'pgsql:host=db;dbname=app',
+                "SELECT \$note\$it's \$\$hunter2\$\$\$note\$ AS \"note\"",
+                'SELECT ? AS "note"',
+            ],
+            // MySQL and MariaDB take text in double quotes as a string, and a backslash escapes a quote.
+            'MySQL string in double quotes' => [
+                'mysql:host=db;dbname=app',
+                'SELECT * FROM `user` WHERE `status` = "hunter2" AND `note` = "say \"hi\""',
+                'SELECT * FROM `user` WHERE `status` = ? AND `note` = ?',
+            ],
+            'MySQL escaped quote' => [
+                'mysql:host=db;dbname=app',
+                "SELECT * FROM `user` WHERE `note` = 'it\\'s' AND `token` = 'hunter2'",
+                'SELECT * FROM `user` WHERE `note` = ? AND `token` = ?',
+            ],
+            // Elsewhere, text in double quotes is a name, kept with any quote and number in it.
+            'PostgreSQL names' => [
+                'pgsql:host=db;dbname=app',
+                "SELECT \"it's\", \"2fa\" FROM \"user\" WHERE \"token\" = 'hunter2'",
+                "SELECT \"it's\", \"2fa\" FROM \"user\" WHERE \"token\" = ?",
+            ],
+            'SQLite names' => [
+                'sqlite::memory:',
+                'SELECT "status" FROM `user2` WHERE `id` = 7',
+                'SELECT "status" FROM `user2` WHERE `id` = ?',
+            ],
+            // Quotes that don't pair up, e.g. around a PostgreSQL string that ends in a backslash: not sent at all.
+            'quotes that do not pair up' => [
+                'pgsql:host=db;dbname=app',
+                "SELECT * FROM \"file\" WHERE \"path\" = 'C:\\' AND \"token\" = 'hunter2'",
+                '[query not shown: its values could not be masked]',
+            ],
+        ];
+    }
+
+    /**
+     * @dataProvider sqlStrings
+     */
+    public function testEveryKindOfStringInSqlIsMasked(string $dsn, string $sql, string $sent): void
+    {
+        $this->createWebApp([], [], [
+            'db' => ['class' => Connection::class, 'dsn' => $dsn],
+            'log' => ['targets' => ['sentry' => ['class' => LogTarget::class]]],
+        ])->getLog();
+
+        Yii::info($sql, 'yii\db\Command::query');
+        Yii::error('payment failed', 'app');
+        Yii::getLogger()->flush(true);
+
+        $this->assertSame([['info', 'db.sql.query', $sent]], $this->breadcrumbs($this->singleEvent()));
+    }
+
+    public function testTheConnectionInUseDecidesToo(): void
+    {
+        $app = $this->createWebApp([], [], [
+            'db' => ['class' => Connection::class, 'dsn' => 'mysql:host=db;dbname=app'],
+            'log' => ['targets' => ['sentry' => ['class' => LogTarget::class]]],
+        ]);
+        $app->getLog();
+        $app->getDb();
+
+        Yii::info('SELECT * FROM `user` WHERE `token` = "hunter2"', 'yii\db\Command::query');
+        Yii::error('payment failed', 'app');
+        Yii::getLogger()->flush(true);
+
+        $this->assertSame(
+            [['info', 'db.sql.query', 'SELECT * FROM `user` WHERE `token` = ?']],
+            $this->breadcrumbs($this->singleEvent())
+        );
+    }
+
+    // --- Sentry Logs --------------------------------------------------------------------------------------------
+
+    public function testSentryLogsAreOffByDefault(): void
+    {
+        $this->appWithLogTarget();
+
+        Yii::info('user opened the cart', 'app');
+        Yii::error('payment failed', 'app');
+        Yii::getLogger()->flush(true);
+
+        $this->assertSame([], $this->transport->logs());
+    }
+
+    public function testMessagesCanBeForwardedToSentryLogs(): void
+    {
+        $this->appWithLogTarget(['sentryLogs' => true]);
+
+        Yii::info('user opened the cart', 'app');
+        Yii::error('payment failed', 'payments');
+        Yii::getLogger()->flush(true);
+
+        $entries = $this->transport->logs();
+        $this->assertSame(['user opened the cart', 'payment failed'], array_column($entries, 'body'));
+        $this->assertSame(['info', 'error'], array_column($entries, 'level'));
+        $this->assertSame('payments', $entries[1]['attributes']['yii.category']['value'] ?? null);
+        $this->assertSame('auto.log.yii2', $entries[1]['attributes']['sentry.origin']['value'] ?? null);
+    }
+
+    public function testSqlSentToSentryLogsIsMaskedToo(): void
+    {
+        $this->appWithLogTarget(['sentryLogs' => true]);
+
+        Yii::info("SELECT * FROM `user` WHERE `email`='ann@example.com'", 'yii\db\Command::query');
+        Yii::getLogger()->flush(true);
+
+        $this->assertSame(['SELECT * FROM `user` WHERE `email`=?'], array_column($this->transport->logs(), 'body'));
+    }
+
+    // --- Version 4 behavior, kept behind the "aggregate" option -------------------------------------------------
+
+    public function testAggregateModeSendsOneEventPerExportLikeVersion4(): void
+    {
+        $this->appWithLogTarget(['aggregate' => true]);
+
+        Yii::warning('first problem', 'app');
+        Yii::error('second problem', 'app');
+        Yii::getLogger()->flush(true);
+
+        $event = $this->singleEvent();
+        $this->assertSame('second problem', $event['message'] ?? null);
+        $this->assertStringContainsString('first problem', implode("\n", (array)($event['extra']['logs'] ?? [])));
+    }
+
+    public function testSqlQueriesThatBecomeEventsAreMasked(): void
+    {
+        $this->appWithLogTarget(['levels' => ['error', 'warning', 'info']]);
+
+        Yii::info("SELECT * FROM `user` WHERE `email`='ann@example.com'", 'yii\db\Command::query');
+        Yii::getLogger()->flush(true);
+
+        $messages = array_column($this->eventsOf('yii\db\Command::query'), 'message');
+        $this->assertSame(['SELECT * FROM `user` WHERE `email`=?'], $messages);
+    }
+
+    public function testAggregatedLogLinesAreScrubbedLikeBreadcrumbs(): void
+    {
+        $this->appWithLogTarget(['aggregate' => true]);
+
+        Yii::warning("Invalid cookie auth key attempted for user '42' from 203.0.113.10: k3y", 'yii\web\User::getIdentityAndDurationFromCookie');
+        Yii::warning(new RuntimeException('Payment declined'), 'app');
+        Yii::error('a later problem', 'app');
+        Yii::getLogger()->flush(true);
+
+        $logs = implode("\n", (array)($this->singleEvent()['extra']['logs'] ?? []));
+        $this->assertStringContainsString("Invalid cookie auth key attempted for user '[Filtered PII]' from [Filtered PII]: [Filtered PII]", $logs);
+        // An exception's class and message, without its stack trace and the arguments in it.
+        $this->assertStringContainsString('RuntimeException: Payment declined', $logs);
+        $this->assertStringNotContainsString('Stack trace', $logs);
+    }
+
+    public function testTheAggregatedMessageIsScrubbedLikeBreadcrumbs(): void
+    {
+        $this->appWithLogTarget(['aggregate' => true]);
+
+        Yii::warning("Invalid session auth key attempted for user '42' from 203.0.113.10: k3y", 'yii\web\User::renewAuthStatus');
+        Yii::getLogger()->flush(true);
+
+        $event = $this->singleEvent();
+        $scrubbed = "Invalid session auth key attempted for user '[Filtered PII]' from [Filtered PII]: [Filtered PII]";
+        $this->assertSame($scrubbed, $event['message'] ?? null);
+        $this->assertSame($scrubbed, $event['extra']['real_body'] ?? null);
+    }
+
+    public function testAggregatedLogLinesDoNotContainTheClientIpUserIdOrSessionIdByDefault(): void
+    {
+        $this->appForPrefixTests();
+
+        $logs = $this->exportTwoMessagesAggregated();
 
         $this->assertStringContainsString('first problem', $logs);
         $this->assertStringNotContainsString(ActiveSession::ID, $logs, 'A session ID in Sentry allows session hijacking.');
@@ -28,37 +405,117 @@ final class LogTargetTest extends TestCase
         $this->assertStringNotContainsString('[42]', $logs);
     }
 
-    public function testLogLinesKeepYiisPrefixWhenSendingPiiIsEnabled(): void
+    public function testAggregatedLogLinesKeepTheClientIpAndUserIdButNotTheSessionIdWhenSendingPiiIsEnabled(): void
     {
-        $this->appWithLogTarget(['send_default_pii' => true]);
+        $this->appForPrefixTests(['send_default_pii' => true]);
 
-        $logs = $this->exportTwoMessages();
+        $logs = $this->exportTwoMessagesAggregated();
+
+        $this->assertStringContainsString('[203.0.113.10][42][[Filtered PII]]', $logs);
+        $this->assertStringNotContainsString(ActiveSession::ID, $logs, 'A session ID is a secret, like the session cookie.');
+    }
+
+    public function testAggregatedLogLinesKeepTheSessionIdWhenSecretsAreSent(): void
+    {
+        $this->appForPrefixTests(['send_default_pii' => true], [], ['scrubSecrets' => false]);
+
+        $logs = $this->exportTwoMessagesAggregated();
 
         $this->assertStringContainsString('[203.0.113.10][42][' . ActiveSession::ID . ']', $logs);
     }
 
+    public function testTheAggregatedPrefixIsLeftOutWhileThePrivacySettingHidesPersonalData(): void
+    {
+        $this->appForPrefixTests(['send_default_pii' => true], [], ['scrubPersonalData' => true]);
+
+        $logs = $this->exportTwoMessagesAggregated();
+
+        $this->assertStringNotContainsString('203.0.113.10', $logs);
+        $this->assertStringNotContainsString('[42]', $logs);
+    }
+
+    public function testWithoutASessionTheAggregatedPrefixSaysSoAsYiiDoes(): void
+    {
+        $this->appForPrefixTests(['send_default_pii' => true]);
+        Yii::$app->set('session', null);
+
+        $logs = $this->exportTwoMessagesAggregated();
+
+        $this->assertStringContainsString('[203.0.113.10][42][-]', $logs);
+    }
+
+    /**
+     * With the SDK's `data_collection` option, the SDK ignores `send_default_pii`: its `user_info` decides.
+     *
+     * @return array<string, array{0: array<string, mixed>, 1: bool}>
+     */
+    public static function dataCollectionPolicies(): array
+    {
+        return [
+            'user info collected' => [['data_collection' => ['user_info' => true]], true],
+            'user info not collected, despite send_default_pii' => [['send_default_pii' => true, 'data_collection' => ['user_info' => false]], false],
+        ];
+    }
+
+    /**
+     * @dataProvider dataCollectionPolicies
+     *
+     * @param array<string, mixed> $sentrySettings
+     */
+    public function testWithTheDataCollectionOptionYiisPrefixFollowsItsUserInfo(array $sentrySettings, bool $kept): void
+    {
+        $this->appForPrefixTests($sentrySettings);
+
+        $logs = $this->exportTwoMessagesAggregated();
+
+        if ($kept) {
+            $this->assertStringContainsString('[203.0.113.10][42]', $logs);
+        } else {
+            $this->assertStringNotContainsString('203.0.113.10', $logs);
+            $this->assertStringNotContainsString('[42]', $logs);
+        }
+    }
+
     public function testACustomPrefixIsRespected(): void
     {
-        $this->appWithLogTarget([], ['prefix' => static function (): string {
+        $this->appForPrefixTests([], ['prefix' => static function (): string {
             return '[custom]';
         }]);
 
-        $logs = $this->exportTwoMessages();
+        $logs = $this->exportTwoMessagesAggregated();
 
         $this->assertStringContainsString('[custom]', $logs);
+    }
+
+    // --- Helpers ------------------------------------------------------------------------------------------------
+
+    /**
+     * @param array<string, mixed> $target
+     * @param array<string, mixed> $sentrySettings
+     */
+    private function appWithLogTarget(array $target = [], array $sentrySettings = []): Application
+    {
+        $app = $this->createWebApp(['sentrySettings' => $sentrySettings], [], [
+            'log' => ['targets' => ['sentry' => array_merge(['class' => LogTarget::class], $target)]],
+        ]);
+        $app->getLog();
+
+        return $app;
     }
 
     /**
      * @param array<string, mixed> $sentrySettings
      * @param array<string, mixed> $target
+     * @param array<string, mixed> $privacy
      */
-    private function appWithLogTarget(array $sentrySettings = [], array $target = []): void
+    private function appForPrefixTests(array $sentrySettings = [], array $target = [], array $privacy = []): void
     {
-        $app = $this->createWebApp(['sentrySettings' => $sentrySettings], [], [
+        $app = $this->createWebApp(['sentrySettings' => $sentrySettings, 'privacy' => $privacy], [], [
             'session' => ['class' => ActiveSession::class],
             'log' => ['targets' => ['sentry' => array_merge([
                 'class' => LogTarget::class,
                 'levels' => ['error', 'warning'],
+                'aggregate' => true,
             ], $target)]],
         ]);
         $app->getLog();
@@ -66,12 +523,51 @@ final class LogTargetTest extends TestCase
         $app->getSession();
     }
 
-    private function exportTwoMessages(): string
+    private function exportTwoMessagesAggregated(): string
     {
         Yii::warning('first problem', 'app');
         Yii::error('second problem', 'app');
         Yii::getLogger()->flush(true);
 
         return implode("\n", (array)($this->singleEvent()['extra']['logs'] ?? []));
+    }
+
+    /**
+     * @return list<array<string, mixed>> the events of messages logged in the category
+     */
+    private function eventsOf(string $category): array
+    {
+        return array_values(array_filter($this->transport->events(), static function (array $event) use ($category): bool {
+            return ($event['logger'] ?? null) === $category;
+        }));
+    }
+
+    private function logAnError(): void
+    {
+        Yii::error('failed somewhere deep', 'app');
+    }
+
+    /**
+     * @param array<string, mixed> $event
+     *
+     * @return list<array{0: string, 1: string, 2: string}> [level, category, message] of each breadcrumb
+     */
+    private function breadcrumbs(array $event): array
+    {
+        return array_map(static function (array $crumb): array {
+            return [$crumb['level'] ?? '', $crumb['category'] ?? '', $crumb['message'] ?? ''];
+        }, $event['breadcrumbs']['values'] ?? []);
+    }
+
+    /**
+     * @param array<string, mixed> $event
+     *
+     * @return array<string, mixed>
+     */
+    private function lastException(array $event): array
+    {
+        $values = $event['exception']['values'] ?? [];
+
+        return $values !== [] ? end($values) : [];
     }
 }

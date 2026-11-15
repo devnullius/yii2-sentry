@@ -7,6 +7,7 @@ use devnullius\yii2\sentry\Integration;
 use devnullius\yii2\sentry\LogTarget;
 use devnullius\yii2\sentry\tests\Support\Identity;
 use devnullius\yii2\sentry\tests\Support\RecordingTransport;
+use yii\db\Connection;
 use yii\log\FileTarget;
 
 /**
@@ -29,6 +30,7 @@ return static function (string $scenario, string $outDir, string $run): array {
         'scriptUrl' => '/index.php',
         'baseUrl' => '',
     ];
+    $session = ['savePath' => "$outDir/sessions"];
     $errorAction = 'site/error';
     $events = [];
 
@@ -46,6 +48,9 @@ return static function (string $scenario, string $outDir, string $run): array {
             break;
         case 'pii_on':
             $sentry['sentrySettings']['send_default_pii'] = true;
+            break;
+        case 'tracing':
+            $sentry['sentrySettings']['traces_sample_rate'] = 1.0;
             break;
         case 'pii_on_tracing':
             $sentry['sentrySettings']['send_default_pii'] = true;
@@ -68,11 +73,19 @@ return static function (string $scenario, string $outDir, string $run): array {
         case 'data_collection':
             $sentry['sentrySettings']['data_collection'] = ['http_bodies' => []];
             break;
+        case 'data_collection_cookies':
+            // The SDK collects the cookies itself; the advanced application template names its session cookie so.
+            $sentry['sentrySettings']['data_collection'] = ['cookies' => ['terms' => ['theme']]];
+            $session['name'] = 'advanced-frontend';
+            break;
         case 'json_api':
             $request['parsers'] = ['application/json' => yii\web\JsonParser::class];
             $integration = new Integration();
             $integration->piiBodyFields = ['site/post-log' => ['password']];
             $sentry['integrations'] = $withIntegration($integration);
+            break;
+        case 'post_bodies_only':
+            $sentry['privacy'] = ['httpMethodsWithRequestBody' => ['POST']];
             break;
         case 'trusted_proxy':
             // Typical production: the app sits behind a load balancer that Yii trusts.
@@ -82,9 +95,8 @@ return static function (string $scenario, string $outDir, string $run): array {
         case 'api_pii':
             // API-style app: no error action, and a failure before any action is resolved.
             if ($scenario === 'api_pii') {
-                $integration = new Integration();
-                $integration->piiBodyFields = ['site/post-log' => ['password']];
-                $sentry['integrations'] = $withIntegration($integration);
+                // Neither a secret nor personal data by name: only the route's rule covers it.
+                $sentry['privacy'] = ['piiBodyFields' => ['site/post-log' => ['nickname']]];
             }
             $errorAction = null;
             $events['on beforeRequest'] = static function (): void {
@@ -107,9 +119,10 @@ return static function (string $scenario, string $outDir, string $run): array {
         'components' => [
             'request' => $request,
             'urlManager' => ['enablePrettyUrl' => true, 'showScriptName' => false],
-            'session' => ['savePath' => "$outDir/sessions"],
+            'session' => $session,
             'user' => ['identityClass' => Identity::class, 'enableAutoLogin' => false],
             'errorHandler' => ['errorAction' => $errorAction],
+            'db' => ['class' => Connection::class, 'dsn' => 'sqlite::memory:'],
             'sentry' => $sentry,
             'log' => [
                 'targets' => [
