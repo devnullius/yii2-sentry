@@ -178,12 +178,19 @@ By default, the SDK's `send_default_pii` option is `false`. In that mode:
   log messages by default.
 
 **Request bodies are sent** for POST, PUT and PATCH requests, unless you filter their fields per route with
-`piiBodyFields` (below). Sentry's [server-side data scrubbing](https://docs.sentry.io/security-legal-pii/scrubbing/)
-can mask more, but don't rely on it alone for passwords and payment data.
+`piiBodyFields` (below). The bodies of other methods, e.g. a DELETE with a body, are left out; the Integration's
+`httpMethodsWithRequestBody` lists the methods. Sentry's
+[server-side data scrubbing](https://docs.sentry.io/security-legal-pii/scrubbing/) can mask more, but don't rely on it
+alone for passwords and payment data.
 
 With `'send_default_pii' => true` in `sentrySettings`, all headers and cookies are sent, the user's IP address is set
 from `yii\web\Request::getUserIP()` (which honors `trustedHosts` when the application runs behind a proxy), and log
 lines keep Yii's `[ip][userId][sessionId]` prefix. `piiBodyFields` is not applied in this mode.
+
+Two warnings that Yii logs itself are sent without their secrets: the one about a login cookie or session whose auth
+key doesn't match loses the key, and the user ID and IP address too while `send_default_pii` is off; the one about a
+database connection of a pool that couldn't be opened loses the password in the DSN. Your own log messages are sent as
+you write them.
 
 ### Filtering headers and body fields
 
@@ -237,6 +244,14 @@ Sentry PHP SDK 4.33 added a `data_collection` option, which replaces `send_defau
 When it is set, in `sentrySettings` or on a client reused with `useExistingHub`, this package leaves the request to the
 SDK's `RequestIntegration`, which applies that policy: `stripHeaders`, `piiHeaders` and `piiBodyFields` don't apply,
 and `decodedParams` is not added. Keep `RequestIntegration` in `integrations` in that case.
+
+The SDK leaves out the cookies named like its own list of words ("session", "sid", "csrf", "identity", …), which
+misses a session cookie named, say, `advanced-frontend`, as in Yii's advanced application template. The component adds
+the names your application gives Yii's session, CSRF and identity cookies to that list (the `cookies` setting's
+`terms`), unless the setting only lets listed cookies through. It reads the names from the components' configuration
+when Sentry starts, or from the components that exist by then, so add a name by hand when it is set elsewhere, e.g.
+by a closure that creates the session component. Add them all by hand on a client you set up yourself with
+`\Sentry\init()`, or with the option given as a `DataCollectionOptions` object.
 
 ## Console applications and queue workers
 
@@ -303,7 +318,8 @@ Tracing is off unless you set a sample rate:
 
 In 4.x, tracing is basic: each controller action is recorded as a transaction, and each
 [yii2-httpclient](https://github.com/yiisoft/yii2-httpclient) request as a separate one. It will be reworked in 5.0:
-see [Known limitations](#known-limitations-in-4x).
+see [Known limitations](#known-limitations-in-4x). The URL of a yii2-httpclient request is recorded without its
+credentials, query string and fragment, which may hold secrets.
 
 ## Known limitations in 4.x
 

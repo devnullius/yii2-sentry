@@ -6,6 +6,7 @@ namespace devnullius\yii2\sentry;
 use Closure;
 use Sentry\Breadcrumb;
 use Sentry\ClientBuilder;
+use Sentry\DataCollection\KeyValueCollectionBehavior;
 use Sentry\Event as SentryEvent;
 use Sentry\Integration\EnvironmentIntegration;
 use Sentry\Integration\ErrorListenerIntegration;
@@ -25,6 +26,7 @@ use Sentry\Tracing\TransactionContext;
 use Throwable;
 use Yii;
 use yii\base\ActionEvent;
+use yii\base\Application;
 use yii\base\BootstrapInterface;
 use yii\base\Controller;
 use yii\base\Event;
@@ -32,6 +34,8 @@ use yii\base\InlineAction;
 use yii\base\InvalidConfigException;
 use yii\httpclient\Client;
 use yii\httpclient\RequestEvent;
+use yii\web\Request;
+use yii\web\Session;
 use yii\web\User;
 use yii\web\UserEvent;
 use function Sentry\startTransaction;
@@ -119,7 +123,12 @@ class Component extends \yii\base\Component implements BootstrapInterface
             $defaults['environment'] = YII_ENV;
         }
 
-        $options = new Options(array_merge($defaults, $this->sentrySettings));
+        $settings = $this->sentrySettings;
+        if (isset($settings['data_collection']) && is_array($settings['data_collection'])) {
+            $settings['data_collection'] = self::withSecretCookiesDenied($settings['data_collection'], self::secretCookieNames());
+        }
+
+        $options = new Options(array_merge($defaults, $settings));
         $options->setIntegrations($this->createIntegrations());
 
         /** @var ClientBuilder $builder */
@@ -211,8 +220,8 @@ class Component extends \yii\base\Component implements BootstrapInterface
             $httpClientSpan = null;
             Event::on(Client::class, Client::EVENT_BEFORE_SEND, function (RequestEvent $event) use (&$httpClientTransaction, &$httpClientSpan) {
                 $transactionContext = new TransactionContext();
-                $transactionContext->setName($event->sender->baseUrl ?? 'remote.http.call');
-                $transactionContext->setOp($event->request->fullUrl ?? 'remote.http.url');
+                $transactionContext->setName(self::urlWithoutSecrets($event->sender->baseUrl ?? null) ?? 'remote.http.call');
+                $transactionContext->setOp(self::urlWithoutSecrets($event->request->fullUrl ?? null) ?? 'remote.http.url');
 
                 $httpClientTransaction = startTransaction($transactionContext);
 
@@ -221,7 +230,7 @@ class Component extends \yii\base\Component implements BootstrapInterface
 
                 // Setup the context for the expensive operation span
                 $spanContext = new SpanContext();
-                $spanContext->setOp($event->request->fullUrl ?? 'remote.http.url');
+                $spanContext->setOp(self::urlWithoutSecrets($event->request->fullUrl ?? null) ?? 'remote.http.url');
 
                 // Start the span
                 $httpClientSpan = $httpClientTransaction->startChild($spanContext);
@@ -276,6 +285,120 @@ class Component extends \yii\base\Component implements BootstrapInterface
         }
 
         return $integrations;
+    }
+
+    /**
+     * A URL as tracing records it: without the credentials, query string and fragment, which may hold secrets, e.g.
+     * "https://user:password@api.example.com/charges?api_key=..." becomes "https://api.example.com/charges".
+     *
+     * @param mixed $url
+     */
+    private static function urlWithoutSecrets($url): ?string
+    {
+        if (!is_string($url)) {
+            return null;
+        }
+
+        // The credentials end at the last "@" before the path.
+        $url = (string)preg_replace('~^((?:[a-z][a-z\d+.-]*:)?//)[^/?#]*@~i', '$1', $url);
+
+        return substr($url, 0, strcspn($url, '?#'));
+    }
+
+    /**
+     * Adds Yii's cookies that hold secrets to the cookies the SDK leaves out under its `data_collection` option: the
+     * SDK collects them itself then, leaving out the ones named like its own list of words, which a name like
+     * "advanced-frontend" for the session cookie isn't. A setting that only lets listed cookies through, or none, is
+     * kept as it is.
+     *
+     * @param array<array-key, mixed> $dataCollection
+     * @param string[] $names
+     *
+     * @return array<array-key, mixed>
+     */
+    private static function withSecretCookiesDenied(array $dataCollection, array $names): array
+    {
+        if ($names === []) {
+            return $dataCollection;
+        }
+
+        $cookies = $dataCollection['cookies'] ?? [];
+        if ($cookies instanceof KeyValueCollectionBehavior) {
+            if ($cookies->getMode() === KeyValueCollectionBehavior::MODE_DENY_LIST) {
+                $dataCollection['cookies'] = KeyValueCollectionBehavior::denyList(array_values(array_unique(array_merge($cookies->getTerms(), $names))));
+            }
+
+            return $dataCollection;
+        }
+
+        // Without a mode, the SDK takes a deny list.
+        if (is_array($cookies) && ($cookies['mode'] ?? KeyValueCollectionBehavior::MODE_DENY_LIST) === KeyValueCollectionBehavior::MODE_DENY_LIST) {
+            $terms = $cookies['terms'] ?? [];
+            if (is_array($terms)) {
+                $cookies['terms'] = array_values(array_unique(array_merge($terms, $names)));
+                $dataCollection['cookies'] = $cookies;
+            }
+        }
+
+        return $dataCollection;
+    }
+
+    /**
+     * The names of the cookies Yii keeps secrets in, as the application configures them: the session cookie, the CSRF
+     * cookie, and the identity cookie of "remember me" logins.
+     *
+     * @return string[]
+     */
+    private static function secretCookieNames(): array
+    {
+        $names = [];
+
+        $sessionName = session_name();
+        if ($sessionName !== false) {
+            $names[] = $sessionName;
+        }
+
+        $app = Yii::$app;
+        if ($app === null) {
+            return $names;
+        }
+
+        $request = $app->getRequest();
+        if ($request instanceof Request) {
+            $names[] = $request->csrfParam;
+        }
+
+        $names[] = self::componentSetting($app, 'session', ['name'], static function ($session): ?string {
+            return $session instanceof Session ? $session->getName() : null;
+        });
+        $names[] = self::componentSetting($app, 'user', ['identityCookie', 'name'], static function ($user): ?string {
+            return $user instanceof User ? ($user->identityCookie['name'] ?? null) : null;
+        }) ?? '_identity';
+
+        return array_values(array_unique(array_filter($names, static function ($name): bool {
+            return is_string($name) && $name !== '';
+        })));
+    }
+
+    /**
+     * Reads a setting of an application component without creating the component: from the component once it
+     * exists, otherwise from its configuration.
+     *
+     * @param string[] $path the setting's keys in the component's configuration
+     * @param callable(object): ?string $read reads the setting from the component
+     */
+    private static function componentSetting(Application $app, string $id, array $path, callable $read): ?string
+    {
+        if ($app->has($id, true)) {
+            return $read($app->get($id));
+        }
+
+        $value = $app->getComponents()[$id] ?? null;
+        foreach ($path as $key) {
+            $value = is_array($value) ? ($value[$key] ?? null) : null;
+        }
+
+        return is_string($value) ? $value : null;
     }
 
     /**

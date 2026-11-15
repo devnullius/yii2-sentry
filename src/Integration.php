@@ -21,7 +21,8 @@ use function in_array;
 class Integration implements IntegrationInterface
 {
     /**
-     * List of HTTP methods for whom the request body must be passed to the Sentry
+     * List of HTTP methods for whom the request body must be passed to the Sentry. The bodies of other methods are left
+     * out.
      *
      * @var string[]
      */
@@ -245,11 +246,11 @@ class Integration implements IntegrationInterface
     private function addRequestBody(Event $event, Request $request, Options $options, array &$requestData): void
     {
         if (!in_array($request->getMethod(), $this->httpMethodsWithRequestBody, true)) {
-            return;
-        }
+            // Without a "data" key, the SDK's RequestIntegration would add the body itself, unfiltered.
+            if (self::hasBody($request)) {
+                $requestData['data'] = 'Not available: ' . $request->getMethod() . ' is not in httpMethodsWithRequestBody.';
+            }
 
-        $rawBody = $request->getRawBody();
-        if ($rawBody === '') {
             return;
         }
 
@@ -257,6 +258,17 @@ class Integration implements IntegrationInterface
         // No action is resolved yet when a request fails before routing, e.g. in bootstrap or "beforeRequest".
         $action = Yii::$app->requestedAction;
         $actionId = $action !== null ? $action->getUniqueId() : null;
+
+        $rawBody = $request->getRawBody();
+        if ($rawBody === '') {
+            // PHP reads a multipart/form-data body into $_POST and $_FILES itself and leaves the raw body empty. The
+            // SDK's RequestIntegration then adds the fields as they are, so the ones piiBodyFields applies to must be
+            // handled here.
+            $isMultipartForm = $_POST !== [] || $_FILES !== [];
+            if (!$isMultipartForm || !$filterFields || ($actionId !== null && !isset($this->piiBodyFields[$actionId]))) {
+                return;
+            }
+        }
 
         if ($filterFields && $actionId === null) {
             // No route's rules can be applied: leave the body out rather than send fields they may cover.
@@ -283,6 +295,18 @@ class Integration implements IntegrationInterface
         $event->setExtra(array_merge($event->getExtra(), [
             'decodedParams' => $bodyParams,
         ]));
+    }
+
+    /**
+     * Whether the request has a body that the SDK's RequestIntegration would add: one that Content-Length announces.
+     * The body itself is not read, as it may be too large to hold in memory, e.g. an upload.
+     */
+    private static function hasBody(Request $request): bool
+    {
+        // Where PHP has no getallheaders(), Yii's headers lack Content-Length, which the SDK then takes from $_SERVER.
+        $length = $request->getHeaders()->get('Content-Length') ?? $_SERVER['CONTENT_LENGTH'] ?? null;
+
+        return (int)$length > 0 || $_POST !== [] || $_FILES !== [];
     }
 
     private function addUserIpAddress(Event $event, ?string $ipAddress, ?string $remoteIp): void

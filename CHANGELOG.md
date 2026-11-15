@@ -4,6 +4,33 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [4.1.1] - 2026-11-15
+
+### Security
+
+- `piiBodyFields` was not applied to forms sent as `multipart/form-data`, such as forms with a file field: PHP reads
+  such a body itself, and the SDK's `RequestIntegration` then sent the fields unfiltered. They are now filtered like
+  the fields of other forms, and left out when the route is not resolved.
+- The line yii2-queue's `LogBehavior` logs about a failed job was sent to Sentry as it was, with any of the job's data
+  it held: everything the job's process printed, when a worker runs the job in a process of its own (yii2-queue's
+  default) and that process fails, e.g. because the job exited; and a dump of the job with all its data, when a stored
+  job can't be read as a job, e.g. because its class was renamed after it was queued. That data is now left out.
+- Yii's own warnings about a login cookie or session whose auth key doesn't match were sent with the user ID, the
+  visitor's IP address and the key, and its warning about a database connection of a pool that couldn't be opened with
+  the connection's DSN, which may hold the password. The key and the password are now left out, and the user ID and IP
+  address too unless `send_default_pii` is enabled.
+- With the SDK's `data_collection` option, the SDK collects the cookies itself, leaving out the ones named like its own
+  list of words, so a session cookie under another name, like `advanced-frontend` in Yii's advanced application
+  template, was sent. The names the application gives Yii's session, CSRF and identity cookies are now added to that
+  list.
+- The body of a request whose method is not in `httpMethodsWithRequestBody` was sent by the SDK's `RequestIntegration`
+  as it was, unfiltered by `piiBodyFields`: e.g. a DELETE with a body, a PUT once the list is narrowed to POST, or any
+  request that a client marks as another method with Yii's `X-Http-Method-Override` header or `_method` field. Such
+  bodies are now left out, as the setting says.
+- With tracing on, a yii2-httpclient request was recorded with its full URL, as the operation of its transaction and
+  span, and with the client's base URL as the transaction's name, so credentials in a URL, e.g.
+  `https://user:password@...`, a query string, e.g. `?api_key=...`, and a fragment were sent. They are now left out.
+
 ## [4.1.0] - 2026-11-10
 
 ### Security
@@ -92,6 +119,7 @@ All notable changes to this project are documented here. The format is based on
 
 [#1]: https://github.com/devnullius/yii2-sentry/issues/1
 [#2]: https://github.com/devnullius/yii2-sentry/pull/2
+[4.1.1]: https://github.com/devnullius/yii2-sentry/compare/4.1.0...4.1.1
 [4.1.0]: https://github.com/devnullius/yii2-sentry/compare/4.0.1...4.1.0
 [4.0.1]: https://github.com/devnullius/yii2-sentry/compare/4.0.0...4.0.1
 [4.0.0]: https://github.com/devnullius/yii2-sentry/compare/1.9.3...4.0.0

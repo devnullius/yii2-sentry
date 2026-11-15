@@ -141,11 +141,89 @@ final class WebReportingTest extends WebServerTestCase
         $this->assertStringNotContainsString('hunter2', (string)json_encode($this->singleEvent($response)));
     }
 
+    public function testAMultipartFormIsFilteredToo(): void
+    {
+        // PHP reads a multipart body into $_POST itself. Up to 4.1.0, the SDK then added the fields unfiltered.
+        [$contentType, $body] = self::multipartForm(['profile[phone]' => '555-0100', 'profile[city]' => 'Paris']);
+
+        $response = $this->request('pii_nested', 'POST', '/site/post-log', [$contentType], $body);
+
+        $event = $this->singleEvent($response);
+        $this->assertStringNotContainsString('555-0100', (string)json_encode($event));
+        $this->assertSame(['phone' => '[Filtered PII]', 'city' => 'Paris'], $event['extra']['decodedParams']['profile'] ?? null);
+    }
+
+    public function testAMultipartBodyIsLeftOutWhenNoRouteRuleCanBeApplied(): void
+    {
+        [$contentType, $body] = self::multipartForm(['username' => 'alice', 'password' => 'hunter2']);
+
+        $response = $this->request('api_pii', 'POST', '/site/post-log', [$contentType], $body);
+
+        $this->assertSame(500, $response['status']);
+        $this->assertStringNotContainsString('hunter2', (string)json_encode($this->singleEvent($response)));
+    }
+
+    public function testTheBodyOfARequestWhoseMethodIsNotListedIsNotSent(): void
+    {
+        // httpMethodsWithRequestBody lists POST, PUT and PATCH: the SDK's RequestIntegration must not send the body of
+        // another method instead, unfiltered.
+        $response = $this->request('default', 'DELETE', '/site/post-log', self::FORM, 'username=alice&password=hunter2');
+
+        $event = $this->singleEvent($response);
+        $this->assertStringNotContainsString('hunter2', (string)json_encode($event));
+        $this->assertSame('Not available: DELETE is not in httpMethodsWithRequestBody.', $event['request']['data'] ?? null);
+    }
+
+    public function testTheBodyOfAMethodLeftOutOfHttpMethodsWithRequestBodyIsNotSent(): void
+    {
+        $response = $this->request('post_bodies_only', 'PUT', '/site/post-log', ['Content-Type: application/json'], '{"username":"alice","password":"hunter2"}');
+
+        $this->assertStringNotContainsString('hunter2', (string)json_encode($this->singleEvent($response)));
+    }
+
+    public function testAClientCannotGetPiiBodyFieldsSkippedByOverridingTheMethod(): void
+    {
+        // Yii takes the method from the X-Http-Method-Override header, and json_api filters "password" on this route.
+        $response = $this->request('json_api', 'POST', '/site/post-log', ['Content-Type: application/json', 'X-Http-Method-Override: DELETE'], '{"username":"alice","password":"hunter2"}');
+
+        $this->assertStringNotContainsString('hunter2', (string)json_encode($this->singleEvent($response)));
+    }
+
+    /**
+     * @return array<string, array{0: string}>
+     */
+    public static function methodsOfRequestsWithoutABody(): array
+    {
+        return ['GET' => ['GET'], 'DELETE' => ['DELETE']];
+    }
+
+    /**
+     * @dataProvider methodsOfRequestsWithoutABody
+     */
+    public function testARequestWithoutABodyGetsNoBodyData(string $method): void
+    {
+        $response = $this->request('default', $method, '/site/log-error');
+
+        $this->assertArrayNotHasKey('data', $this->singleEvent($response)['request'] ?? []);
+    }
+
     public function testTheSdkDataCollectionPolicyIsHonored(): void
     {
         $response = $this->request('data_collection', 'POST', '/site/post-log', self::FORM, 'username=alice&password=hunter2');
 
         $this->assertStringNotContainsString('hunter2', (string)json_encode($this->singleEvent($response)));
+    }
+
+    public function testWithTheDataCollectionOptionYiisSessionCookieIsLeftOutUnderTheNameTheApplicationGivesIt(): void
+    {
+        $response = $this->request('data_collection_cookies', 'GET', '/site/log-error', ['Cookie: advanced-frontend=s3ss10n-1d; theme=dark; lang=hy']);
+
+        $event = $this->singleEvent($response);
+        $sent = (string)json_encode($event);
+        $this->assertStringNotContainsString('s3ss10n-1d', $sent, 'A session ID in Sentry allows session hijacking.');
+        // The application's own terms are kept, and the other cookies collected.
+        $this->assertStringNotContainsString('dark', $sent);
+        $this->assertStringContainsString('hy', (string)json_encode($event['request']['cookies'] ?? null));
     }
 
     public function testTheDataCollectionPolicyOfAReusedClientIsHonored(): void
@@ -173,5 +251,21 @@ final class WebReportingTest extends WebServerTestCase
         $headers = json_encode($this->singleEvent($response)['request']['headers'] ?? []);
         $this->assertStringNotContainsString('198.51.100.23', (string)$headers, 'The visitor IP is personal data.');
         $this->assertStringNotContainsString('c2VjcmV0', (string)$headers);
+    }
+
+    /**
+     * @param array<string, string> $fields
+     *
+     * @return array{0: string, 1: string} the Content-Type header and the body
+     */
+    private static function multipartForm(array $fields): array
+    {
+        $boundary = 'test-boundary';
+        $body = '';
+        foreach ($fields as $name => $value) {
+            $body .= "--$boundary\r\nContent-Disposition: form-data; name=\"$name\"\r\n\r\n$value\r\n";
+        }
+
+        return ["Content-Type: multipart/form-data; boundary=$boundary", $body . "--$boundary--\r\n"];
     }
 }
